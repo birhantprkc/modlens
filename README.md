@@ -169,10 +169,10 @@ npx -y skills add liustack/vibemaster -g
 
 The projects worth recommending in the DeepSeek Harness ecosystem.
 
-- 🖥️ **[DeepSeek Harness Desktop](https://github.com/anywhere-labs/deepseek-harness-desktop)** — A desktop front end for DeepSeek Harness. Start and manage the Harness service on your own machine without installing Node.js or running a command. A plugin market, remote control from a phone, and IM channels are on its roadmap. [Site](https://www.dshdesktop.cn)
-  为 DeepSeek Harness 生态打造的现代化桌面端。不用配置 Node.js，也不用敲命令，就能启动和管理本机的 Harness 服务。后续还会支持插件市场、移动端远程控制和 IM Channels。[官网](https://www.dshdesktop.cn)
 - 🛒 **[dsh-market](https://github.com/dsh-market/dsh-market)** — The plugin market inside DeepSeek Harness. Browse 800+ community plugins with category filters and screenshot previews, one-click install and update, and live theme switching. Most need no restart.
   DeepSeek Harness 的可视化插件市场。设置页里直接逛社区全部 800+ 插件：分类筛选、截图预览、一键安装与更新、主题即点即换，装完多数免重启。
+- 🖥️ **[DeepSeek Harness Desktop](https://github.com/anywhere-labs/deepseek-harness-desktop)** — A desktop front end for DeepSeek Harness. Start and manage the Harness service on your own machine without installing Node.js or running a command. A plugin market, remote control from a phone, and IM channels are on its roadmap. [Site](https://www.dshdesktop.cn)
+  为 DeepSeek Harness 生态打造的现代化桌面端。不用配置 Node.js，也不用敲命令，就能启动和管理本机的 Harness 服务。后续还会支持插件市场、移动端远程控制和 IM Channels。[官网](https://www.dshdesktop.cn)
 
 ## Star History
 
