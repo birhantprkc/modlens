@@ -18,7 +18,7 @@ import { resolveSpawnPlan } from '../util/winExec.ts';
  * model id (a provider/ prefix is stripped before matching). Deliberately
  * hardcoded: the field moves fast but a release cadence keeps up, and harness
  * metadata (codex input_modalities, pi input) outranks this table wherever it
- * exists. Snapshot: 2026-08.
+ * exists. Snapshot: 2026-08 (mimo/qwen tiers re-checked against models.dev on 2026-08-20).
  */
 const VISION_MODEL_PATTERNS = [
     'claude-*',
@@ -32,6 +32,9 @@ const VISION_MODEL_PATTERNS = [
     'qwen*-vl*',
     'qwen3.5-plus*',
     'qwen3.6-plus*',
+    'qwen3.7-plus*',
+    'qwen3.7-flash*',
+    'qwen3.8-max*',
     'kimi-k2.5*',
     'kimi-k2.6*',
     'kimi-k2.7*',
@@ -39,6 +42,11 @@ const VISION_MODEL_PATTERNS = [
     'moonshot-v1-*vision*',
     'minimax-vl*',
     'minimax-m3*',
+    // mimo-v2.5's pro tier is text-only, so the free/base tiers are named
+    // exactly instead of a mimo-v2.5* wildcard.
+    '*mimo-v2.5',
+    '*mimo-v2.5-free',
+    'mimo-v2-omni*',
     'deepseek-vl*',
     'deepseek-ocr*',
     'janus*',

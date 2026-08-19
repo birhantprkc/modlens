@@ -45,6 +45,28 @@ describe('builtin vision table', () => {
         expect(isVisionModel('openrouter/gemini-3-flash')).toBe(true);
         expect(isVisionModel('deepseek/deepseek-chat')).toBe(false);
     });
+
+    // The opencode-go catalog (models.dev) declares these image-capable (#70).
+    it('recognizes the qwen 3.7/3.8 vision generation', () => {
+        expect(isVisionModel('qwen3.7-plus')).toBe(true);
+        expect(isVisionModel('opencode-go/qwen3.7-plus')).toBe(true);
+        expect(isVisionModel('qwen3.7-flash')).toBe(true);
+        expect(isVisionModel('qwen3.8-max')).toBe(true);
+    });
+
+    it('recognizes vision mimo variants without claiming the text-only pro tier', () => {
+        expect(isVisionModel('mimo-v2.5')).toBe(true);
+        expect(isVisionModel('mimo-v2.5-free')).toBe(true);
+        expect(isVisionModel('xiaomi-mimo-v2.5')).toBe(true);
+        expect(isVisionModel('mimo-v2-omni')).toBe(true);
+        expect(isVisionModel('mimo-v2.5-pro')).toBe(false);
+        expect(isVisionModel('mimo-v2.5-pro-free')).toBe(false);
+        expect(isVisionModel('mimo-v2-pro')).toBe(false);
+    });
+
+    it('leaves the text-only qwen max tier of 3.7 unclaimed', () => {
+        expect(isVisionModel('qwen3.7-max')).toBe(false);
+    });
 });
 
 describe('discoverAuto probes', () => {
