@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.21.2 - 2026-08-20
+
+- **README: dsh-market now leads the ecosystem partners list.** Both the English and Chinese READMEs list the visual plugin market first, ahead of DeepSeek Harness Desktop. Docs only, no code change.
+
 ## 3.21.1 - 2026-08-19
 
 - **`config use openai constructor` can no longer destroy a key, and hostile hand edits meet one discipline everywhere ([3.21.0 acceptance]).** An independent acceptance run against 3.21.0 found real data loss: the label `constructor` walked the prototype chain, came back as Object's constructor, and emptied the active slot under a success message, destroying an unsaved key with `--discard`. Seven adversarial review rounds then hardened every surface the same hostile input can reach: bundle labels, provider names (`config set constructor.apiKey` used to write the key onto a global object and print success), and the registry all read own properties only; malformed roots, entries, bundles, and field types fail with a fix-or-remove sentence naming the path, at `set`, `save`, `use`, `guards.*`, and a new execute boundary in reads and doctor; and `config show`, built to be pasted into issues, now runs every value through redaction against every known key with no length assumption, while no property name in the view ever carries user data, the structural guarantee a dedicated regression walks and asserts. Two display designs that keyed rows by user data each grew a credential leak during review; the shipped view keeps labels, slot names, and unknown spellings inside redacted values, where they cannot leak or collide.
