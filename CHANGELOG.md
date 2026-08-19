@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.22.0 - 2026-08-20
+
+- **OpenCode Go's vision models are now borrowable through `reuse.opencode` ([#70](https://github.com/liustack/modlens/issues/70)).** The `opencode models` listing carries no modality data, so the built-in vision table judges the ids, and that table's snapshot predated the qwen 3.7 generation and knew no mimo at all: discovery filtered out `qwen3.7-plus` and `mimo-v2.5`, and the opencode-cli route never registered. The table now recognizes `qwen3.7-plus`, `qwen3.7-flash`, `qwen3.8-max`, `mimo-v2.5` with its `-free` tier, and `mimo-v2-omni`, each verified image-capable against OpenCode's own catalog on models.dev. `mimo-v2.5-pro` and `qwen3.7-max` stay excluded because that catalog declares them text-only, which is why the mimo entries are exact tiers rather than a wildcard. Go-plan users also have a no-release-needed route: the endpoint speaks the OpenAI protocol, so `openai.baseUrl https://opencode.ai/zen/go/v1` plugs it into the openai slot directly. Thanks to @hatanokokosa for the report.
+
 ## 3.21.2 - 2026-08-20
 
 - **README: dsh-market now leads the ecosystem partners list.** Both the English and Chinese READMEs list the visual plugin market first, ahead of DeepSeek Harness Desktop. Docs only, no code change.
