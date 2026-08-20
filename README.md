@@ -10,11 +10,10 @@
 
 <p align="center">
   <a href="./README.zh-CN.md">简体中文</a> ·
-  <a href="docs/troubleshooting.md">Troubleshooting</a> ·
   <a href="skills/modlens/references/configure.md">Configuration</a> ·
-  <a href="docs/output-schema.md">Output contract</a> ·
+  <a href="docs/troubleshooting.md">Troubleshooting</a> ·
   <a href="docs/security.md">Security</a> ·
-  <a href="https://github.com/liustack/modsearch"><b>🔎 ModSearch (web search)</b></a>
+  <a href="https://github.com/liustack/modsearch"><b>🔍 ModSearch (the best free web search plugin for DSH)</b></a>
 </p>
 
 <p align="center">
@@ -30,22 +29,22 @@ The flagship DeepSeek and GLM chat models are text-only and cannot read images. 
 
 ## Talk to us
 
-Issues are welcome any time: [open one](https://github.com/liustack/modlens/issues/new/choose). And come find me on X: **[@liustack](https://x.com/liustack)**. What you built with it, which harness you are on, what should come next. New releases land there first, and a proper community space is on the way.
+Issues are welcome any time: [open one](https://github.com/liustack/modlens/issues/new/choose). Follow the liustack WeChat official account, and come find me on X: **[@liustack](https://x.com/liustack)**. What you built with it, which harness you are on, and what should come next are all shared on WeChat and X. A proper community space is on the way.
 
 ## Highlights
 
-**🥇 The most capable vision plugin for DeepSeek Harness (dsh):** one command, `npx -y @deepseek-ai/dsh plugin --profile web add @liustack/modlens@3.22.0`, and the text-only DeepSeek model behind dsh reads images through a native `modlens_read_image` tool. Updating is the same command again. The version is named rather than `@latest` on purpose: pnpm 11 holds back releases published in the last 24 hours and resolves the tag against what survives, so `@latest` would install whatever shipped a day ago ([details](docs/harness-setup.md#keeping-it-up-to-date)).
+**🥇 The most capable vision plugin for DeepSeek Harness (dsh):** install it instantly with one command: `npx -y @deepseek-ai/dsh plugin --profile web add @liustack/modlens@3.22.0`. See the [setup guide](docs/harness-setup.md) for installation and update details. If the command line is not your thing but you still want to try DSH, check out <a href="https://github.com/liustack/aimanager"><b>AIManager</b></a>, the lightest desktop wrapper for DeepSeek Harness. It gets you started with zero code or configuration and installs every dependency for you with one click.
 
 Pasting an image works two ways. **① Just paste.** On a text-only model the pasted image lands as a private temp file and its path enters the composer — the same interaction OpenCode and Pi ship — and the `modlens_read_image` tool takes it from there. **② Pick a `(modlens vision)` entry** in the model selector (it remembers your choice, so once is enough), then paste: the thumbnail stays visible in your message, closer to the Codex app feel, and the image is converted to structured evidence at request time, answered by the same underlying route. The plugin auto-discovers every provider route carrying text-only DeepSeek or GLM models and adds a wrapped entry per route (a stock install gets **`DeepSeek-V4-Flash (modlens vision)`** and **`DeepSeek-V4-Pro (modlens vision)`**; extra routes like opencode-go or zai get their own); the two families' own vision models are excluded automatically. Which paste route applies is the host's per-model call: only a model its metadata positively confirms text-only is taken over, anything unconfirmed is left alone, so vision models keep their native paste ([details](docs/harness-setup.md)).
 
-**Paste an image and it reads it.** No saving to a file and passing a path first.
+**Paste images directly in every harness.** No saving to a file and passing a path first.
 
 - **The lightest touch on the market.** No hooks, no wrappers, no local proxy daemon, not a single line changed in any harness config: on the skill harnesses it is exactly one skill folder, on dsh exactly one plugin. Uninstalling is deleting a folder, and your agents are back to stock.
-- **Zero-config start.** Reuses what Claude Code, Codex, OpenCode, or Pi already have set up: the multimodal models on your machine go straight to work. Nothing at all? Antigravity CLI is a free no-key channel, and a free Gemini key brings a read down to 5-10 seconds.
+- **Zero-config start.** Reuses existing setup in Claude Code, Codex, OpenCode, and Pi, plus other multimodal models already on your machine. Nothing installed locally? Antigravity CLI is a free no-key channel, and a free Gemini key brings a read down to 5-10 seconds. API keys from every major OpenAI-compatible provider work too.
 - **Evidence, not imagination.** Full transcription, reading-order layout regions, entity and relation lists. The model quotes specifics.
 - **Install once, use everywhere.** Verified on real machines in Claude Code, Codex, Pi, and OpenCode.
 
-## Installation
+## Install in other harnesses
 
 **Step 1, hand it to your AI.** Send it this line:
 

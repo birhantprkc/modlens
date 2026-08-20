@@ -10,11 +10,10 @@
 
 <p align="center">
   <a href="./README.md">English</a> ·
-  <a href="docs/troubleshooting.zh-CN.md">故障排查</a> ·
   <a href="skills/modlens/references/configure.zh-CN.md">配置</a> ·
-  <a href="docs/output-schema.zh-CN.md">输出契约</a> ·
+  <a href="docs/troubleshooting.zh-CN.md">故障排查</a> ·
   <a href="docs/security.zh-CN.md">安全</a> ·
-  <a href="https://github.com/liustack/modsearch"><b>🔎 ModSearch（联网搜索）</b></a>
+  <a href="https://github.com/liustack/modsearch"><b>🔍 ModSearch（DSH 最强免费联网搜索插件）</b></a>
 </p>
 
 <p align="center">
@@ -30,11 +29,11 @@ DeepSeek 和 GLM 的主力对话模型是纯文本的，无法进行图片识别
 
 ## 交流
 
-欢迎随时提[issue](https://github.com/liustack/modlens/issues/new/choose)。也欢迎来 X 上聊：**[@liustack](https://x.com/liustack)**，你用它做了什么、在哪个 harness 上跑、接下来该做什么，新版本也是那边先发。社群正在筹备中。
+有问题随时提[issue](https://github.com/liustack/modlens/issues/new/choose)。推荐你关注公众号 liustack，也欢迎你来 X 上聊：**[@liustack](https://x.com/liustack)**。你用它做了什么、在哪个 harness 上跑、接下来该做什么，都会在公众号和 X 同步更新。社群正在筹备中。
 
 ## 亮点
 
-**🥇 全网最强的 DeepSeek Harness（dsh）外挂视觉识别插件：**一条命令 `npx -y @deepseek-ai/dsh plugin --profile web add @liustack/modlens@3.22.0`，dsh 背后的纯文本 DeepSeek 模型即可通过原生 `modlens_read_image` 工具读图。更新就是再跑一遍同一条命令。这里点名版本号而不用 `@latest` 是有意的：pnpm 11 会扣住最近 24 小时内发布的版本，dist-tag 只在剩下的里面解析，用 `@latest` 装到的会是一天前发布的那个（[细节](docs/harness-setup.zh-CN.md#保持更新)）。
+**🥇 全网最强的 DeepSeek Harness（dsh）外挂视觉识别插件：**一条命令即刻安装 `npx -y @deepseek-ai/dsh plugin --profile web add @liustack/modlens@3.22.0`。更多安装与更新细节参考 [配置手册](docs/harness-setup.zh-CN.md) 。如果用不惯命令行，也想想玩玩 DSH，推荐食用全网最轻量级的 DeepSeek Harness 桌面版封装 <a href="https://github.com/liustack/aimanager"><b> AIManager</b></a>，零代码零配置起手，一键帮你安装所有依赖环境。
 
 DeepSeek Harness 粘贴识图有两种玩法。
 
@@ -42,14 +41,14 @@ DeepSeek Harness 粘贴识图有两种玩法。
 
 **② 切到带 `(modlens vision)` 后缀的模型变体**（选择器有记忆，选一次就行）再粘贴：缩略图直接可见、所见即所得，体验更接近 Codex App。变体由插件自动发现生成：每条承载纯文本 DeepSeek 或 GLM 模型的 provider 路由各得一组包装条目（默认安装下就是 **`DeepSeek-V4-Flash (modlens vision)`** 和 **`DeepSeek-V4-Pro (modlens vision)`**，装了 opencode-go、zai 等额外路由的机器会各自多出一组），两家自己的视觉型号自动排除。走哪条通路由 host 依据真实模型元数据逐个裁决：只有被元数据确认纯文本的模型才会被接管，确认不了的一律不动，视觉模型因此保留原生贴图（[细节](docs/harness-setup.zh-CN.md)）。
 
-**直接粘贴图片识别** 无需先保存成文件再提供路径。
+**所有 Harness 直接粘贴图片识别** 无需先保存成文件再提供路径。
 
 - **全网最轻量。** 不用 hook，不套壳，不跑本地代理进程，不改任何 harness 配置的一行字：在 skill 类 harness 里它就是一个 skill 文件夹，在 dsh 里就是一个插件。卸载等于删个文件夹，你的 agent 立刻回到原样。
-- **零配置起手。** 复用 Claude Code、Codex、OpenCode、Pi 已配置，直接复用你本机的其他多模态模型。什么都没有？Antigravity CLI 是免 key 的免费通道，配一个免费 Gemini key 可将识别耗时降至 5 到 10 秒。
-- **基于证据而非想象。** 全文转录、按阅读顺序划分的版面区块、实体与关系列表，模型引用的是具体内容。
+- **零配置起手。** 复用 Claude Code、Codex、OpenCode、Pi 已有配置，直接复用你本机的其他多模态模型。如果你本机什么都没安装？Antigravity CLI 是免 key 的免费通道，配一个免费 Gemini key 可将识别耗时降至 5 到 10 秒。也支持所有主流的 OpenAI 兼容格式 API key。
+- **基于证据，而非想象。** 全文转录、按阅读顺序划分的版面区块、实体与关系列表，模型引用的是具体内容。
 - **一次安装，多端可用。** Claude Code、Codex、Pi、OpenCode 均经真机验证。
 
-## 安装
+## 在其他 Harness 中安装
 
 **第一步，交给你的 AI。** 把这句话发给它：
 
