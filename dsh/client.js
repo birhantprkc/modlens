@@ -205,9 +205,9 @@ window.__ModuleLoader__.load({
         cliNote: 'This engine signs in through its own CLI: no key, no endpoint.',
         autoTitle: 'Auto mode',
         autoHint: 'Reuse the vision engines already on this machine.',
-        found: 'found',
         notLoggedIn: 'found, not signed in',
-        notFound: 'not on this machine',
+        loadFailed: 'load failed',
+        saveFailed: 'save failed',
         envSourced:
           'These come from environment variables. Saving copies them into the config file, which then becomes this engine’s only source.',
       },
@@ -232,9 +232,9 @@ window.__ModuleLoader__.load({
         cliNote: '该引擎通过自己的 CLI 登录，无需密钥和接口地址。',
         autoTitle: 'auto 模式',
         autoHint: '自动复用本机已有视觉引擎。',
-        found: '已找到',
         notLoggedIn: '已找到，未登录',
-        notFound: '本机没有',
+        loadFailed: '加载失败',
+        saveFailed: '保存失败',
         envSourced: '这些值来自环境变量。保存会把它们写进配置文件，此后该引擎只认配置文件。',
       },
     }
@@ -242,6 +242,18 @@ window.__ModuleLoader__.load({
     function labels() {
       var lang = (document.documentElement.lang || navigator.language || 'en').toLowerCase()
       return lang.indexOf('zh') === 0 ? TEXT.zh : TEXT.en
+    }
+
+    // What the footer says when a request fails. Whatever the server said
+    // travels untranslated ('unknown engine: x', a path error): that is the
+    // diagnosis, and mapping it to error codes would buy a translation table
+    // with a much larger contact surface than this card is worth. Only the
+    // silent case, where there is no detail to show, gets a localized line.
+    function noteFrom(error, fallback) {
+      // An Error whose message is empty is the no-detail case, not a thing to
+      // stringify: String(error) on it reads 'Error'.
+      var detail = error && typeof error.message === 'string' ? error.message : error ? String(error) : ''
+      return detail || fallback
     }
 
     // The next draft when the engine changes or a summary arrives. The three
@@ -403,7 +415,7 @@ window.__ModuleLoader__.load({
           fetch('/modlens/config?discover=1')
             .then((r) =>
               r.json().then((body) => {
-                if (!r.ok) throw new Error(body.error || 'load failed')
+                if (!r.ok) throw new Error(body.error || '')
                 return body
               }),
             )
@@ -413,7 +425,7 @@ window.__ModuleLoader__.load({
               noteState[1]('')
             })
             .catch((error) => {
-              noteState[1](String(error.message ? error.message : error))
+              noteState[1](noteFrom(error, t.loadFailed))
             })
         }, [])
 
@@ -732,7 +744,7 @@ window.__ModuleLoader__.load({
                       })
                         .then((r) =>
                           r.json().then((payload) => {
-                            if (!r.ok) throw new Error(payload.error || 'save failed')
+                            if (!r.ok) throw new Error(payload.error || '')
                             return payload
                           }),
                         )
@@ -745,7 +757,7 @@ window.__ModuleLoader__.load({
                           noteState[1](t.saved)
                         })
                         .catch((error) => {
-                          noteState[1](String(error.message ? error.message : error))
+                          noteState[1](noteFrom(error, t.saveFailed))
                         })
                     },
                     style: {

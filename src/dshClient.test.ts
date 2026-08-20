@@ -649,3 +649,150 @@ describe('the rendered API key field, not just the helper (#56)', () => {
         }
     });
 });
+
+describe('a failed load or save speaks the reader’s language', () => {
+    // The footer note lands in a role="status" region, so it is read aloud.
+    // The two failure paths used to hard-code English fallbacks, which put
+    // "load failed" under a Chinese card. What the server said still travels
+    // untranslated: that is the diagnosis, not the card's copy.
+    const SOURCE = fs.readFileSync(path.join(__dirname, '..', 'dsh', 'client.js'), 'utf-8');
+
+    interface Node {
+        type: unknown;
+        props: Record<string, unknown>;
+        kids: unknown[];
+    }
+
+    /** Render the card once, with the given states and a failing route. */
+    function render(options: { lang: string; states: unknown[]; detail?: string }): {
+        notes: string[];
+        nodes: Node[];
+    } {
+        let loaded:
+            | {
+                  factory: (require: (id: string) => unknown) => {
+                      __card: { ConfigCard: (react: unknown, ui: unknown) => () => unknown };
+                  };
+              }
+            | undefined;
+        const windowStub = {
+            __ModuleLoader__: {
+                load: (definition: typeof loaded) => {
+                    loaded = definition;
+                },
+            },
+        };
+        const documentStub = {
+            addEventListener: () => {},
+            removeEventListener: () => {},
+            querySelectorAll: () => [],
+            documentElement: { lang: options.lang },
+        };
+        // Every /modlens/config request fails; the body carries a server
+        // detail only where the test asked for one.
+        const fetchStub = () =>
+            Promise.resolve({
+                ok: false,
+                status: 500,
+                json: () => Promise.resolve(options.detail ? { error: options.detail } : {}),
+            });
+        new Function('window', 'document', 'CSS', 'fetch', 'navigator', SOURCE)(
+            windowStub,
+            documentStub,
+            undefined,
+            fetchStub,
+            { language: options.lang },
+        );
+
+        // The note is the fourth useState in the card, after open, summary
+        // and draft; only its setter is worth recording.
+        const notes: string[] = [];
+        const nodes: Node[] = [];
+        let index = 0;
+        const react = {
+            createElement: (type: unknown, props: Record<string, unknown>, ...kids: unknown[]) => {
+                const node = { type, props: props ?? {}, kids };
+                nodes.push(node);
+                return node;
+            },
+            useState: () => {
+                const slot = index++;
+                return [
+                    options.states[slot],
+                    (value: unknown) => {
+                        if (slot === 3) notes.push(String(value));
+                    },
+                ];
+            },
+            useEffect: (fn: () => void) => {
+                fn();
+            },
+            useCallback: (fn: unknown) => fn,
+        };
+        const Input = function Input() {
+            return null;
+        };
+        const Card = (loaded as NonNullable<typeof loaded>)
+            .factory(() => ({}))
+            .__card.ConfigCard(react, { Input });
+        Card();
+        return { notes, nodes };
+    }
+
+    /** A drained microtask queue: the card's fetch chains are promise-only. */
+    async function settle(): Promise<void> {
+        for (let i = 0; i < 10; i++) await Promise.resolve();
+    }
+
+    // Expanded with nothing loaded yet: the effect fires the load, which fails.
+    const loadStates = (): unknown[] => [true, null, null, ''];
+
+    // Expanded with a summary whose draft was edited, so save is enabled.
+    const saveStates = (): unknown[] => [
+        true,
+        {
+            provider: 'openai',
+            engines: { openai: { baseUrl: 'https://a', model: 'a', hasKey: true } },
+            keyless: [],
+            reuse: {},
+        },
+        { provider: 'openai', apiKey: '', baseUrl: 'https://a', model: 'b', reuse: {} },
+        '',
+    ];
+
+    function clickSave(nodes: Node[], label: string): void {
+        const button = nodes.find((node) => node.type === 'button' && node.kids.includes(label));
+        if (!button) throw new Error(`no save button labelled ${label}`);
+        (button.props.onClick as () => void)();
+    }
+
+    it('falls back to a localized line when the server said nothing', async () => {
+        const zh = render({ lang: 'zh-CN', states: loadStates() });
+        await settle();
+        expect(zh.notes).toEqual(['加载失败']);
+
+        const en = render({ lang: 'en', states: loadStates() });
+        await settle();
+        expect(en.notes).toEqual(['load failed']);
+    });
+
+    it('says so in the reader’s language when a save fails', async () => {
+        const zh = render({ lang: 'zh-CN', states: saveStates() });
+        clickSave(zh.nodes, '保存');
+        await settle();
+        expect(zh.notes).toEqual(['保存中…', '保存失败']);
+
+        const en = render({ lang: 'en', states: saveStates() });
+        clickSave(en.nodes, 'Save');
+        await settle();
+        expect(en.notes).toEqual(['saving...', 'save failed']);
+    });
+
+    it('shows what the server said rather than translating it', async () => {
+        // 'unknown engine: x' and path errors are the diagnosis. Mapping them
+        // to error codes would buy a translation table for a dozen strings.
+        const zh = render({ lang: 'zh-CN', states: loadStates(), detail: 'unknown engine: x' });
+        await settle();
+        expect(zh.notes).toEqual(['unknown engine: x']);
+    });
+});
