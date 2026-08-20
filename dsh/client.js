@@ -239,8 +239,15 @@ window.__ModuleLoader__.load({
       },
     }
 
-    function labels() {
-      var lang = (document.documentElement.lang || navigator.language || 'en').toLowerCase()
+    // The copy this card speaks. `active` is dsh's own interface language,
+    // when its locale service was there to say. Asked first because the page
+    // language is not an answer on dsh 0.1.0-rc.7: the built index.html
+    // freezes `<html lang="zh-CN">` and never rewrites it, so a user set to
+    // English still read a Chinese card. Absent the service (older
+    // hosts, profiles that ship no locale) the page then the browser decide,
+    // unchanged.
+    function labels(active) {
+      var lang = (active || document.documentElement.lang || navigator.language || 'en').toLowerCase()
       return lang.indexOf('zh') === 0 ? TEXT.zh : TEXT.en
     }
 
@@ -364,9 +371,24 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function ConfigCard(react, ui) {
+    // `localeRef` is a { current } handle on dsh's locale service, not the
+    // service itself: it is optional and may land after the card is built,
+    // so it is read at render time rather than captured here. Absent, both
+    // helpers below hand back nothing and labels() takes its old path.
+    function ConfigCard(react, ui, localeRef) {
       var h = react.createElement
       var Input = ui.Input
+
+      // Built once per card so useSyncExternalStore is not handed a new
+      // subscribe on every render, which would resubscribe every render.
+      var subscribeLocale = (onChange) => {
+        var locale = localeRef?.current
+        return locale ? locale.subscribe(onChange) : () => {}
+      }
+      var readLocale = () => {
+        var locale = localeRef?.current
+        return locale ? locale.getSnapshot().active : ''
+      }
 
       // The chrome is the native plugin card's, value for value (border,
       // layer backgrounds, 12px radius, header row with a rotating chevron,
@@ -397,7 +419,18 @@ window.__ModuleLoader__.load({
         )
 
       return function ModlensCard() {
-        var t = labels()
+        // Subscribed, not sampled: the language is a live setting, and a card
+        // sitting open while the user switches has to follow. getSnapshot and
+        // subscribe are the pair dsh documents as useSyncExternalStore-safe.
+        // That hook is React 18 and up; where it is missing the language is
+        // read once per render instead, which still follows a switch as soon
+        // as anything re-renders the card. The branch is on a closure
+        // constant, so hook order never varies within one card.
+        var t = labels(
+          typeof react.useSyncExternalStore === 'function'
+            ? react.useSyncExternalStore(subscribeLocale, readLocale)
+            : readLocale(),
+        )
         var openState = react.useState(false)
         var summaryState = react.useState(null)
         var draftState = react.useState(null)
@@ -841,11 +874,31 @@ window.__ModuleLoader__.load({
     }
 
     function registerCard(ctx) {
-      // Reaching for an undeclared service throws in cordis, so the optional
-      // dependency rides a scoped ctx.inject: the closure runs where slots
-      // exists and never runs where it does not, exactly as the host half
-      // takes webServer.
+      // Reaching for an undeclared service throws in cordis, so each optional
+      // dependency rides a scoped ctx.inject of its own: the closure runs
+      // where the service exists and never runs where it does not, exactly as
+      // the host half takes webServer.
       if (typeof ctx.inject !== 'function') return
+
+      // dsh's language service gets an inject of its own, and fills a handle
+      // the card reads later. Listing it beside slots would be worse than
+      // useless: ctx.inject waits for every service named, so on a host that
+      // never provides locale the card would never register at all. Here a
+      // missing service just leaves the handle empty, and the card falls back
+      // to the page language.
+      var localeRef = { current: null }
+      ctx.inject(['locale'], (scope) => {
+        localeRef.current = scope.locale
+        if (typeof scope.effect === 'function') {
+          scope.effect(
+            () => () => {
+              localeRef.current = null
+            },
+            'modlens: locale handle',
+          )
+        }
+      })
+
       ctx.inject(['slots'], (scope) => {
         // The card and its route live and die together: with the host route
         // off (settingsCard: false, or no web profile) a card would only
@@ -856,7 +909,7 @@ window.__ModuleLoader__.load({
           .then((response) => {
             if (response.status === 404) return
             try {
-              mountCard(scope)
+              mountCard(scope, localeRef)
             } catch (error) {
               console.error(`[modlens] settings card skipped: ${error}`)
             }
@@ -865,7 +918,7 @@ window.__ModuleLoader__.load({
       })
     }
 
-    function mountCard(ctx) {
+    function mountCard(ctx, localeRef) {
       var react
       try {
         react = require('react')
@@ -874,7 +927,7 @@ window.__ModuleLoader__.load({
         return
       }
       var ui = require('@deepseek-ai/dsh-client-ui-primitives')
-      var Card = ConfigCard(react, ui)
+      var Card = ConfigCard(react, ui, localeRef)
       ctx.slots.inject('settings.plugin.item', function* () {
         yield ctx.slots.register({ name: 'settings.plugin.item', id: 'modlens', key: 'modlens', order: 30 }, Card)
       })
@@ -904,7 +957,8 @@ window.__ModuleLoader__.load({
       secretFieldProps: secretFieldProps,
       ConfigCard: ConfigCard,
     }
-    // `slots` is optional, so it is not required here: registerCard checks.
+    // `slots` and `locale` are both optional, so neither is required here:
+    // registerCard takes each on its own scoped inject.
     exports.inject = []
     return module.exports
   },

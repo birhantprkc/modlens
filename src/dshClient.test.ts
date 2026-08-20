@@ -414,6 +414,18 @@ describe('settings card (#39)', () => {
         expect(on.slotRegistrations).toEqual(['modlens']);
     });
 
+    it('asks for the locale service on its own inject, not beside slots', async () => {
+        // ctx.inject waits for every service it names. Naming locale in the
+        // slots inject would mean no card at all on a host that ships no
+        // locale service, which is the opposite of an optional dependency.
+        const on = loadCard(200);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(on.injected).toContainEqual(['locale']);
+        expect(on.injected).toContainEqual(['slots']);
+        // And the card mounted anyway, with that inject's callback never run.
+        expect(on.slotRegistrations).toEqual(['modlens']);
+    });
+
     it('registers under the key rc.7 dispatches by and the id rc.6 lists by (#61, #65)', async () => {
         // rc.7 made settings.plugin.item a keyed slot: register throws without
         // options.key, and the card renders only when the key matches a
@@ -794,5 +806,164 @@ describe('a failed load or save speaks the reader’s language', () => {
         const zh = render({ lang: 'zh-CN', states: loadStates(), detail: 'unknown engine: x' });
         await settle();
         expect(zh.notes).toEqual(['unknown engine: x']);
+    });
+});
+
+describe('the card follows dsh’s own interface language', () => {
+    // dsh 0.1.0-rc.7 ships `<html lang="zh-CN">` frozen into the built
+    // index.html and never rewrites it, so a user whose dsh is set to English
+    // still got a Chinese card. The locale service knows the real answer, so
+    // it is asked first and the page language is only the fallback.
+    const SOURCE = fs.readFileSync(path.join(__dirname, '..', 'dsh', 'client.js'), 'utf-8');
+
+    /** A stand-in for dsh's LocaleRuntime, read side plus a switch. */
+    class FakeLocale {
+        private snapshot: { active: string; locales: unknown[]; revision: number };
+        private readonly listeners = new Set<() => void>();
+        public subscribeCalls = 0;
+
+        constructor(active: string) {
+            this.snapshot = { active, locales: [], revision: 1 };
+        }
+
+        getSnapshot(): { active: string; locales: unknown[]; revision: number } {
+            return this.snapshot;
+        }
+
+        getLocale(): { active: string; locales: unknown[]; revision: number } {
+            return this.snapshot;
+        }
+
+        subscribe(fn: () => void): () => void {
+            this.subscribeCalls += 1;
+            this.listeners.add(fn);
+            return () => this.listeners.delete(fn);
+        }
+
+        setLocale(active: string): void {
+            this.snapshot = { active, locales: [], revision: this.snapshot.revision + 1 };
+            for (const fn of this.listeners) fn();
+        }
+    }
+
+    interface Mounted {
+        /** Every string child the latest render produced. */
+        texts: string[];
+        /** How many times the card re-rendered after the first. */
+        renders: number;
+    }
+
+    /**
+     * Render the collapsed card once and keep re-rendering it the way React
+     * would: whatever useSyncExternalStore subscribed with is the re-render.
+     */
+    function mount(options: { lang: string; locale?: FakeLocale }): Mounted {
+        let loaded:
+            | {
+                  factory: (require: (id: string) => unknown) => {
+                      __card: {
+                          ConfigCard: (
+                              react: unknown,
+                              ui: unknown,
+                              localeRef?: unknown,
+                          ) => () => unknown;
+                      };
+                  };
+              }
+            | undefined;
+        const windowStub = {
+            __ModuleLoader__: {
+                load: (definition: typeof loaded) => {
+                    loaded = definition;
+                },
+            },
+        };
+        const documentStub = {
+            addEventListener: () => {},
+            removeEventListener: () => {},
+            querySelectorAll: () => [],
+            documentElement: { lang: options.lang },
+        };
+        new Function('window', 'document', 'CSS', 'fetch', 'navigator', SOURCE)(
+            windowStub,
+            documentStub,
+            undefined,
+            () => Promise.resolve({ ok: true, json: () => Promise.resolve({}) }),
+            { language: options.lang },
+        );
+
+        const state: Mounted = { texts: [], renders: 0 };
+        let subscribed = false;
+        const react = {
+            createElement: (type: unknown, props: Record<string, unknown>, ...kids: unknown[]) => {
+                for (const kid of kids) if (typeof kid === 'string') state.texts.push(kid);
+                return { type, props: props ?? {}, kids };
+            },
+            useState: (initial: unknown) => [initial, () => {}],
+            useEffect: () => {},
+            useCallback: (fn: unknown) => fn,
+            useSyncExternalStore: (
+                subscribe: (onChange: () => void) => () => void,
+                getSnapshot: () => unknown,
+            ) => {
+                // React subscribes once per mount and re-renders on notice.
+                if (!subscribed) {
+                    subscribed = true;
+                    subscribe(() => {
+                        state.renders += 1;
+                        state.texts = [];
+                        Card();
+                    });
+                }
+                return getSnapshot();
+            },
+        };
+        const Input = function Input() {
+            return null;
+        };
+        const Card = (loaded as NonNullable<typeof loaded>)
+            .factory(() => ({}))
+            .__card.ConfigCard(
+                react,
+                { Input },
+                options.locale ? { current: options.locale } : undefined,
+            );
+        Card();
+        return state;
+    }
+
+    const ZH_TITLE = '视觉引擎（ModLens）';
+    const EN_TITLE = 'Vision engine (ModLens)';
+
+    it('speaks English where dsh is set to English under a zh-CN page', () => {
+        // The reported bug: locale.preference: en, but <html lang="zh-CN">.
+        const card = mount({ lang: 'zh-CN', locale: new FakeLocale('en') });
+        expect(card.texts).toContain(EN_TITLE);
+        expect(card.texts).not.toContain(ZH_TITLE);
+    });
+
+    it('speaks Chinese where dsh is set to Chinese under an English page', () => {
+        const card = mount({ lang: 'en-US', locale: new FakeLocale('zh') });
+        expect(card.texts).toContain(ZH_TITLE);
+        expect(card.texts).not.toContain(EN_TITLE);
+    });
+
+    it('falls back to the page language where the host serves no locale service', () => {
+        // Older dsh and every non-web profile: nothing to ask, so the old
+        // chain stands unchanged.
+        expect(mount({ lang: 'zh-CN' }).texts).toContain(ZH_TITLE);
+        expect(mount({ lang: 'en-US' }).texts).toContain(EN_TITLE);
+    });
+
+    it('switches copy when the user switches language mid-session', () => {
+        const locale = new FakeLocale('zh');
+        const card = mount({ lang: 'zh-CN', locale });
+        expect(card.texts).toContain(ZH_TITLE);
+        expect(locale.subscribeCalls).toBe(1);
+
+        locale.setLocale('en');
+        expect(card.renders).toBe(1);
+        expect(card.texts).toContain(EN_TITLE);
+        expect(card.texts).not.toContain(ZH_TITLE);
     });
 });

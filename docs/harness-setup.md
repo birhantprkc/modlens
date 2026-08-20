@@ -75,6 +75,12 @@ The card never receives a stored key, only whether one is set, and leaving the
 key field empty keeps the stored one. `settingsCard: false` in the plugin row
 removes it, route included.
 
+The card's own text follows dsh's interface language setting, switching
+between Chinese and English as you switch dsh. On a dsh too old to expose that
+setting to plugins, it follows the browser language instead. What the server
+says back on a failure (an unknown engine, a path that would not open) stays as
+it is: that is the diagnosis, not copy.
+
 ### Keeping it up to date
 
 modlens ships often, and both install shapes freeze at whatever version they
