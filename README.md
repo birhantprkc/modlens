@@ -39,6 +39,8 @@ Pasting an image works two ways. **① Just paste.** On a text-only model the pa
 
 **Paste images directly in every harness.** No saving to a file and passing a path first.
 
+A hotkey that captures the screen into DeepSeek Harness is a separate plugin: [dsh-screenshot](https://github.com/paicat1/dsh-screenshot).
+
 - **The lightest touch on the market.** No hooks, no wrappers, no local proxy daemon, not a single line changed in any harness config: on the skill harnesses it is exactly one skill folder, on dsh exactly one plugin. Uninstalling is deleting a folder, and your agents are back to stock.
 - **Zero-config start.** Reuses existing setup in Claude Code, Codex, OpenCode, and Pi, plus other multimodal models already on your machine. Nothing installed locally? Antigravity CLI is a free no-key channel, and a free Gemini key brings a read down to 5-10 seconds. API keys from every major OpenAI-compatible provider work too.
 - **Evidence, not imagination.** Full transcription, reading-order layout regions, entity and relation lists. The model quotes specifics.
@@ -67,7 +69,7 @@ On DeepSeek Harness the command line is not the only way in. Settings → Plugin
 
 ## Usage
 
-Once installed, just chat. Paste an image or drop a path, ask anything, and the skill triggers on its own: the image goes to a vision engine and the answer comes back grounded in what it read.
+Once installed, just chat. Paste an image or drop a path, ask anything, and the skill triggers on its own: the image goes to a vision engine and the answer comes back grounded in what it read. Paste once, and later questions about the same image do not need another paste.
 
 ## Vision engines: six built-in providers, four reusable CLIs, one failover chain
 

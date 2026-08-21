@@ -43,6 +43,8 @@ DeepSeek Harness 粘贴识图有两种玩法。
 
 **所有 Harness 直接粘贴图片识别** 无需先保存成文件再提供路径。
 
+需要快捷键把屏幕截进 DeepSeek Harness 时，用独立插件 [dsh-screenshot](https://github.com/paicat1/dsh-screenshot)。
+
 - **全网最轻量。** 不用 hook，不套壳，不跑本地代理进程，不改任何 harness 配置的一行字：在 skill 类 harness 里它就是一个 skill 文件夹，在 dsh 里就是一个插件。卸载等于删个文件夹，你的 agent 立刻回到原样。
 - **零配置起手。** 复用 Claude Code、Codex、OpenCode、Pi 已有配置，直接复用你本机的其他多模态模型。如果你本机什么都没安装？Antigravity CLI 是免 key 的免费通道，配一个免费 Gemini key 可将识别耗时降至 5 到 10 秒。也支持所有主流的 OpenAI 兼容格式 API key。
 - **基于证据，而非想象。** 全文转录、按阅读顺序划分的版面区块、实体与关系列表，模型引用的是具体内容。
@@ -79,7 +81,7 @@ npx -y @deepseek-ai/dsh plugin --profile web add @liustack/modlens@3.22.1
 
 ## 用法
 
-装好之后不需要记任何命令。正常聊天，粘贴图片或给出图片路径，提问即可，skill 自动触发：图片交给视觉引擎，答案基于读到的内容返回。
+装好之后不需要记任何命令。正常聊天，粘贴图片或给出图片路径，提问即可，skill 自动触发：图片交给视觉引擎，答案基于读到的内容返回。贴一次，后面追问同一张图不用再贴。
 
 ## 视觉引擎：六个内置 provider，四家可复用 CLI，一条故障转移链
 
