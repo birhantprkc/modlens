@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.23.1 - 2026-08-21
+
+- **dsh 0.1.1: `(modlens vision)` routes work again ([#73](https://github.com/liustack/modlens/issues/73)).** dsh 0.1.1 dispatches every call — and its replay path — through a new required adapter method, `prepareCall(provider, model, signal)`, and threw `registration.adapter.prepareCall is not a function` on every turn of a wrapped route. Real adapters inherit a base-class default that binds `resolveModel` and `stream` into one generation; the wrapper registers a plain object, so it now carries the same pair itself, exactly mirroring the upstream default. Hosts that never call `prepareCall` (dsh 0.1.0) ignore the extra method. The regression test drives the wrapper through the 0.1.1 dispatch shape and failed with the reported TypeError before the fix. Thanks to @5ME for a report that had already located both call sites.
+
 ## 3.23.0 - 2026-08-21
 
 - **dsh: a vision model never gets a `(modlens vision)` twin, even from a catalog that forgot to say it sees ([#71](https://github.com/liustack/modlens/issues/71) surfaced the mechanism).** DeepSeek launched `deepseek-v4-flash-vision-exp` today, and the official dsh catalog declares its image modality from day one, so the stock route was never at risk. But third-party catalogs and hand-written `models` lists copy an id without its modalities, and the wrapper's name gate only knew the older spellings (`deepseek-vl`, `deepseek-ocr`, `janus`, `glm-…v`): an id whose own name says `vision` would have been wrapped as text-only, stripping its native sight. The name gate now reads the word `vision` in the bare model id. The judgment also classifies by the bare id deliberately: a gateway namespace that happens to contain the word cannot veto the text model behind it, and a leading `~` alias marker cannot hide one.
