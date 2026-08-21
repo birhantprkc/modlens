@@ -439,6 +439,58 @@ describe('dsh plugin vision provider (phase 3)', () => {
         });
     });
 
+    it("serves dsh 0.1.1's prepareCall dispatch (#73)", async () => {
+        // dsh 0.1.1 routes every call (and its replay path) through
+        // adapter.prepareCall and throws "prepareCall is not a function" on
+        // adapters that lack it. Real adapters inherit a base-class default
+        // binding resolveModel and stream into one generation; this plain
+        // object must carry the same pair itself, like providerInfo above.
+        const registered: Array<{
+            providers: string[];
+            adapter: Record<string, CallableFunction>;
+        }> = [];
+        const streamed: Array<Record<string, unknown>> = [];
+        const llm = {
+            registerAdapter: (providers: string[], adapter: Record<string, CallableFunction>) => {
+                registered.push({ providers, adapter });
+            },
+            listModels: async () => [{ id: 'deepseek-v4-flash' }],
+            resolveModelInfo: async (_p: string, model: string) => ({
+                provider: 'deepseek-official',
+                id: model,
+                name: 'DeepSeek V4 Flash',
+                inputModalities: ['text'],
+            }),
+            providerRetryPolicy: () => undefined,
+            stream: (options: Record<string, unknown>) => {
+                streamed.push(options);
+                return (async function* () {})();
+            },
+        };
+        await loadWith(llm);
+        const adapter = registered[0].adapter;
+        const signal = new AbortController().signal;
+        const call = (await adapter.prepareCall(
+            'deepseek-modlens',
+            'deepseek-v4-flash',
+            signal,
+        )) as {
+            model: { provider: string; id: string; inputModalities: string[] };
+            stream: (options: Record<string, unknown>) => AsyncIterable<unknown>;
+        };
+        expect(call.model).toMatchObject({ provider: 'deepseek-modlens', id: 'deepseek-v4-flash' });
+        expect(call.model.inputModalities).toEqual(['text', 'image']);
+        for await (const _chunk of call.stream({
+            provider: 'deepseek-modlens',
+            model: 'deepseek-v4-flash',
+            messages: [],
+            signal,
+        })) {
+            // drain
+        }
+        expect(streamed[0].provider).toBe('deepseek-official');
+    });
+
     it('degrades silently without the registration surface or when disabled', async () => {
         await loadWith(undefined);
         const registered: unknown[] = [];

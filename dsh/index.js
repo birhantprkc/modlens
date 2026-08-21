@@ -643,6 +643,16 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
           }
           return { ...withVision(info), id: model }
         },
+        async prepareCall(provider, model, signal) {
+          // dsh 0.1.1 dispatches every call (and its replay path) through
+          // prepareCall (#73). Real adapters inherit exactly this pair from
+          // the LlmAdapter base class; a plain object supplies it itself,
+          // like providerInfo above. Hosts that never call it ignore it.
+          return {
+            model: await this.resolveModel(provider, model, signal),
+            stream: (options) => this.stream(options),
+          }
+        },
         stream(options) {
           // Convert at request time, not at log time: the durable session
           // log keeps the real image blocks (so the UI shows the paste
