@@ -2147,6 +2147,61 @@ describe('dsh vision provider auto-discovery (#29)', () => {
         expect(registered).toEqual(['modlens-opencode-go']);
     });
 
+    it('never wraps a vision-named model, even when the catalog omits modalities', async () => {
+        // deepseek-v4-flash-vision-exp shipped 2026-08-21. The official dsh
+        // catalog declares image input, but third-party catalogs and custom
+        // `models` lists copy the id without the modalities, and a vision
+        // model given a wrapper twin loses its native sight. The name is the
+        // one signal every catalog carries.
+        const { registered } = await discoveryCtx([
+            {
+                id: 'lagging-gateway',
+                models: [{ id: 'deepseek-v4-flash-vision-exp' }],
+            },
+        ]);
+        expect(registered).toEqual([]);
+    });
+
+    it('sees family models behind a vendor namespace prefix', async () => {
+        // OpenRouter spells GLM as z-ai/glm-5.2:free and aliases carry a
+        // leading ~. Text-only family members are exactly what the wrapper
+        // exists for, wherever the id keeps its vendor prefix.
+        const { registered } = await discoveryCtx([
+            {
+                id: 'openrouter',
+                models: [{ id: 'z-ai/glm-5.2:free' }],
+            },
+        ]);
+        expect(registered).toEqual(['modlens-openrouter']);
+    });
+
+    it('classifies by the bare model id, not the vendor namespace or alias marker', async () => {
+        // A gateway namespace is not a model name: "vision/" must not trip
+        // the vision-name gate for the text model behind it, and a leading ~
+        // alias marker must not hide a family member from the wrapper.
+        const { registered } = await discoveryCtx([
+            { id: 'ns-gateway', models: [{ id: 'vision/deepseek-v4-flash' }] },
+            { id: 'alias-gateway', models: [{ id: '~glm-5.2' }] },
+        ]);
+        expect([...registered].sort()).toEqual(['modlens-alias-gateway', 'modlens-ns-gateway']);
+    });
+
+    it('a namespaced vision model stays excluded by name and by modality', async () => {
+        const { registered } = await discoveryCtx([
+            { id: 'openrouter-v', models: [{ id: 'z-ai/glm-4.6v' }] },
+            {
+                id: 'openrouter-vx',
+                models: [
+                    {
+                        id: 'deepseek/deepseek-v4-flash-vision-exp',
+                        inputModalities: ['text', 'image'],
+                    },
+                ],
+            },
+        ]);
+        expect(registered).toEqual([]);
+    });
+
     it('a set upstream keeps single-route legacy mode', async () => {
         const { registered } = await discoveryCtx([deepseek, opencode], {
             upstream: 'deepseek-official',

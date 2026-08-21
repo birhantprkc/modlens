@@ -548,14 +548,24 @@ function restoreUpstreamSource(messages, wrapperId, upstream) {
 
 function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
   // Wrap only the text-only members of these families. Their own vision
-  // models (present or future: deepseek-vl/ocr/janus, glm-4.5v, glm-5v-...)
-  // need no bridge and are excluded by name and by declared modality.
+  // models (present or future: deepseek-vl/ocr/janus, glm-4.5v, glm-5v-...,
+  // deepseek-v4-flash-vision-exp) need no bridge and are excluded by name and
+  // by declared modality. The name gate matters on its own: third-party
+  // catalogs copy an id without its modalities, and a vision model handed a
+  // wrapper twin loses its native sight. Family matching also strips a vendor
+  // namespace (OpenRouter's z-ai/glm-5.2:free, ~-prefixed aliases), because
+  // the text-only member is the same model wherever the id carries a prefix.
   const families = config.families || ['deepseek', 'glm']
-  const VISION_ID = /(deepseek-(vl|ocr)|janus|glm-[\d.]*v(\b|-))/i
+  const VISION_ID = /(deepseek-(vl|ocr)|janus|glm-[\d.]*v(\b|-)|\bvision\b)/i
   const shouldWrap = (info) => {
     const id = String(info?.id ?? '').toLowerCase()
-    if (!families.some((family) => id.startsWith(family))) return false
-    if (VISION_ID.test(id)) return false
+    // The model's own name: alias marker and vendor namespace stripped. The
+    // vision-name gate reads only this, so a gateway namespace that happens
+    // to contain the word cannot veto the text model behind it.
+    const unaliased = id.replace(/^~/, '')
+    const bare = unaliased.slice(unaliased.lastIndexOf('/') + 1)
+    if (!families.some((family) => id.startsWith(family) || bare.startsWith(family))) return false
+    if (VISION_ID.test(bare)) return false
     if (Array.isArray(info?.inputModalities) && info.inputModalities.includes('image')) return false
     return true
   }
