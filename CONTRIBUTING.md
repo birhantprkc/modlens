@@ -16,9 +16,22 @@ Everything below is for people working on a fork.
 
 ## Scope
 
-ModLens does one thing: turn an image into structured JSON evidence for
-text-only models. Web search and page fetching live in a sibling project
-([ModSearch](https://github.com/liustack/modsearch)), not here.
+The contract: an image the user hands over is read once, and that read
+leaves text later turns can quote. The image exists because the user
+pasted it, dropped a path, or gave a URL. Capture is a different job.
+
+Out of scope, and it stays out:
+
+- a camera, screenshot capture, or hotkeys
+- CDP, or holding a browser session
+- computer-use (screen plus keyboard and mouse)
+- a pixel toolbox (grounding, crop, pixel-diff, reconstructing a UI)
+- bounding boxes or confidence scores (dropped from the schema on
+  purpose)
+
+Visual parsing is the only job. Web search and page fetching live in a
+sibling project ([ModSearch](https://github.com/liustack/modsearch)),
+not here.
 
 ## Setup
 
