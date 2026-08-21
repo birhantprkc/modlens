@@ -49,6 +49,9 @@ const VISION_MODEL_PATTERNS = [
     'mimo-v2-omni*',
     'deepseek-vl*',
     'deepseek-ocr*',
+    // DeepSeek's V4 vision endpoint (2026-08-21); the docs name vision models
+    // by the word, so the wildcard covers the exp tier and its successors.
+    'deepseek-*vision*',
     'janus*',
     'pixtral*',
     'llama-4*',
@@ -59,7 +62,10 @@ const VISION_MODEL_PATTERNS = [
 ];
 
 export function isVisionModel(modelId: string): boolean {
-    const bare = modelId.includes('/') ? modelId.slice(modelId.lastIndexOf('/') + 1) : modelId;
+    const unaliased = modelId.replace(/^~/, '');
+    const bare = unaliased.includes('/')
+        ? unaliased.slice(unaliased.lastIndexOf('/') + 1)
+        : unaliased;
     return VISION_MODEL_PATTERNS.some((pattern) => globMatch(pattern, bare));
 }
 

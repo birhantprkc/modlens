@@ -32,6 +32,10 @@ describe('builtin vision table', () => {
         expect(isVisionModel('Claude-Fable-5')).toBe(true);
         expect(isVisionModel('glm-5v-turbo')).toBe(true);
         expect(isVisionModel('qwen3-vl-32b')).toBe(true);
+        // DeepSeek's first vision endpoint, launched 2026-08-21; the official
+        // docs name it the only image-accepting model in the family.
+        expect(isVisionModel('deepseek-v4-flash-vision-exp')).toBe(true);
+        expect(isVisionModel('deepseek/deepseek-v4-flash-vision-exp')).toBe(true);
     });
 
     it('does not claim text-only coding models', () => {
@@ -44,6 +48,8 @@ describe('builtin vision table', () => {
     it('matches provider-prefixed ids by their bare model id', () => {
         expect(isVisionModel('openrouter/gemini-3-flash')).toBe(true);
         expect(isVisionModel('deepseek/deepseek-chat')).toBe(false);
+        // OpenRouter alias spellings carry a leading ~ marker.
+        expect(isVisionModel('~deepseek-v4-flash-vision-exp')).toBe(true);
     });
 
     // The opencode-go catalog (models.dev) declares these image-capable (#70).
