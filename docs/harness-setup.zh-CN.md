@@ -96,6 +96,12 @@ skill 类 harness 上，skill 是一个拷贝出来的文件夹，拷贝会保�
 
 走上面第一条粘贴路线就不会遇到:图片变成文件路径,会话里从不存在附件,模型选择器也就不会被锁住。只有在变体或视觉模型上粘贴时才会产生附件,而那种场景下附件本来就是目的。
 
+### 给其他插件作者：向 `(modlens vision)` 路由注入图片
+
+包装路由声明的 `inputModalities: ['text', 'image']` 是承诺，不是装饰（[#74](https://github.com/liustack/modlens/issues/74)）。请求里的每一个 `image` 块，无论来自用户粘贴还是其他插件注入（包括嵌在 tool result 里的），都会在请求时转成结构化证据文本，再发往 text-only 上游。没有任何内容被静默丢弃，所以「声明 image 就注入原生图片块，否则注入文件路径」这条分支不用区分对面是真视觉模型还是 modlens 包装。
+
+唯一前提：块必须带宿主附件引用，即 `ctx.attachments.saveImage` 返回、Web UI 粘贴产生的那种形状，插件靠 `ctx.attachments.readImage(block.attachment)` 取字节。手搓的只含路径或 base64 的块会落进固定的读取失败占位。另外不要在声明 image 的路由上给图片块旁边再附路径文本：块在这里已经变成完整证据，多出的路径会诱导模型用工具把同一张图再读一遍，双倍配额，还产生同一内容的第二种措辞，正是 [#68](https://github.com/liustack/modlens/issues/68) 清除过的前缀缓存抖动。
+
 ### 粘贴转路径（paste-to-path，web profile）
 
 过去在 dsh Web UI 里，**纯文本模型**下粘贴图片会死在图片准入检查这一步。插件现在带了一个浏览器端半边（由 dsh 的客户端插件系统自动加载），恰好在这种情况下接管粘贴：图片字节发到插件在 dsh web 服务器上的 `/modlens/paste` 路由（仅回环地址，校验 magic byte，上限 25 MB），落成一个私有临时文件，输入框收到的则是纯文本的文件路径。这与 Pi、OpenCode、Claude Code 递给模型的形态一致，也正是 modlens skill 和 `modlens_read_image` 工具的首要触发条件。消息里不带图片附件，准入检查根本不会触发。
