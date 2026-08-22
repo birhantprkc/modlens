@@ -165,13 +165,19 @@ ModLens does not accept pull requests. The project is maintained by a single aut
 
 ## Shameless plug
 
+**[ModSearch](https://github.com/liustack/modsearch)** is ModLens's sibling project, the same craft applied to another missing sense: it gives models with no web access web search, X search, and single-page fetch. Free, no signup, no API key. A model that needs ModLens for its eyes usually needs ModSearch for the web:
+
+```bash
+npx -y @deepseek-ai/dsh plugin --profile web add @liustack/modsearch@latest
+```
+
 Follow the **liustack** WeChat official account: AI startup opportunities, indie-dev insights, and hands-on AI tooling, delivered as they happen. Scan the QR code in WeChat, or search for "liustack":
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/liustack/modlens/main/assets/wechat-qrcode.png" width="420" alt="liustack WeChat official account" />
 </p>
 
-⭐ If it helps, star [ModLens](https://github.com/liustack/modlens). Stars are how the next developer finds it.
+⭐ If it helps, star [ModLens](https://github.com/liustack/modlens) and [ModSearch](https://github.com/liustack/modsearch). Stars are how the next developer finds them.
 
 ## Key ecosystem partners
 

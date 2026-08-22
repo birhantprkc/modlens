@@ -174,13 +174,19 @@ Codex 桌面 App 中识别一张推文截图。作者、配文、照片内容（
 
 ## 插入一条硬广
 
+**[ModSearch](https://github.com/liustack/modsearch)** 是 ModLens 的同门项目，同一套手艺补另一种感官：给不能联网的模型补上网页搜索、X 搜索和单页抓取。免费，免注册，免 API key。模型既然需要 ModLens 当眼睛，多半也需要 ModSearch 联网：
+
+```bash
+npx -y @deepseek-ai/dsh plugin --profile web add @liustack/modsearch@latest
+```
+
 关注微信公众号「liustack」：AI 创业机会、独立开发见解、AI 实战与工具，第一时间推送。微信扫码，或搜一搜「liustack」：
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/liustack/modlens/main/assets/wechat-qrcode.png" width="420" alt="微信公众号 liustack" />
 </p>
 
-⭐ 如果它对你有用，请给 [ModLens](https://github.com/liustack/modlens) 一个 star，这是其他开发者找到它的方式。
+⭐ 如果它对你有用，请给 [ModLens](https://github.com/liustack/modlens) 和 [ModSearch](https://github.com/liustack/modsearch) 一个 star，这是其他开发者找到它们的方式。
 
 ## 重要生态伙伴
 
