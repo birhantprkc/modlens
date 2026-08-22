@@ -43,6 +43,7 @@ A hotkey that captures the screen into DeepSeek Harness is a separate plugin: [d
 
 - **The lightest touch on the market.** No hooks, no wrappers, no local proxy daemon, not a single line changed in any harness config: on the skill harnesses it is exactly one skill folder, on dsh exactly one plugin. Uninstalling is deleting a folder, and your agents are back to stock.
 - **Zero-config start.** Reuses existing setup in Claude Code, Codex, OpenCode, and Pi, plus other multimodal models already on your machine. Nothing installed locally? Antigravity CLI is a free no-key channel, and a free Gemini key brings a read down to 5-10 seconds. API keys from every major OpenAI-compatible provider work too.
+- **Comma-separated keys rotate on auth, rate-limit, or quota failures.** Other failures skip remaining keys and keep the existing provider failover.
 - **Evidence, not imagination.** Full transcription, reading-order layout regions, entity and relation lists. The model quotes specifics.
 - **Install once, use everywhere.** Verified on real machines in Claude Code, Codex, Pi, and OpenCode.
 
@@ -95,6 +96,8 @@ modlens config set openai.baseUrl https://dashscope.aliyuncs.com/compatible-mode
 modlens config set openai.apiKey  <key>
 modlens config set openai.model   qwen3-vl-plus
 ```
+
+`apiKey` (and the matching env var) also accepts a comma-separated list. ModLens rotates to the next key after authentication, rate-limit, or quota failures. Network, 5xx, and parse failures skip remaining keys and keep provider failover.
 
 The same three keys work for GLM's open platform, SiliconFlow, OpenRouter, a self-hosted vLLM/Ollama, or any gateway of your own. If your favorite vision model has an OpenAI-compatible API, ModLens can drive it.
 
@@ -162,13 +165,13 @@ ModLens does not accept pull requests. The project is maintained by a single aut
 
 ## Shameless plug
 
-This project runs on LIUSTACK Skills: `shaping` before you build, `coding` while you build, `dig` when it breaks, `snapshot` when you hand off. Lighter than Superpowers, and stronger.
+Follow the **liustack** WeChat official account: AI startup opportunities, indie-dev insights, and hands-on AI tooling, delivered as they happen. Scan the QR code in WeChat, or search for "liustack":
 
-```bash
-npx -y skills add liustack/vibemaster -g
-```
+<p align="center">
+  <img src="https://raw.githubusercontent.com/liustack/modlens/main/assets/wechat-qrcode.png" width="420" alt="liustack WeChat official account" />
+</p>
 
-⭐ If it helps, star [ModLens](https://github.com/liustack/modlens) and [VibeMaster](https://github.com/liustack/vibemaster). Stars are how the next developer finds them.
+⭐ If it helps, star [ModLens](https://github.com/liustack/modlens). Stars are how the next developer finds it.
 
 ## Key ecosystem partners
 
