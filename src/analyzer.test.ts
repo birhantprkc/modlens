@@ -4,6 +4,16 @@ import * as path from 'path';
 import { pathToFileURL } from 'url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { analyzeImage, composeChain, removeWorkdir, resolveInput, runCommand } from './analyzer.ts';
+import {
+    buildCooldownController,
+    cooldownStateKey,
+    DEFAULT_COOLDOWN_MS,
+    emptyCooldownState,
+    loadCooldownState,
+    MONTHLY_COOLDOWN_MS,
+    recordQuotaCooldown,
+} from './cooldown.ts';
+import { ApiKeyFailureError } from './util/apiKeys.ts';
 
 const onWindows = process.platform === 'win32';
 
@@ -151,6 +161,94 @@ describe('composeChain remote security boundary', () => {
         expect(chain.map((p) => p.name)).toEqual(['pi:openai', 'antigravity-cli']);
         fs.rmSync(dir, { recursive: true, force: true });
         fs.rmSync(home, { recursive: true, force: true });
+    });
+
+    it('keeps a cooling inline provider ahead of agents on a remote URL', () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-chain-bin-'));
+        fs.writeFileSync(path.join(dir, 'agy'), '#!/bin/sh\n', { mode: 0o755 });
+        const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-chain-cd-'));
+        const statePath = path.join(stateDir, 'state.json');
+        const now = new Date('2026-08-06T00:00:00.000Z');
+        recordQuotaCooldown(
+            emptyCooldownState(),
+            'gemini-api',
+            new ApiKeyFailureError('out of credits', { quotaCooldown: 'default' }),
+            now,
+            statePath,
+            undefined,
+            0,
+        );
+        const chain = composeChain(
+            'remote',
+            { providers: { 'gemini-api': { apiKey: 'only-key' } } },
+            { env: { PATH: dir } },
+            buildCooldownController({}, { now, statePath }),
+        );
+        expect(chain.map((p) => p.name)).toEqual(['gemini-api', 'antigravity-cli']);
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(stateDir, { recursive: true, force: true });
+    });
+
+    it('keeps reused inline keys ahead of agents when the file gemini-api is cooling', () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-chain-bin-'));
+        fs.writeFileSync(path.join(dir, 'agy'), '#!/bin/sh\n', { mode: 0o755 });
+        fs.writeFileSync(path.join(dir, 'pi'), '#!/bin/sh\necho k\n', { mode: 0o755 });
+        const home = fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-chain-home-'));
+        fs.mkdirSync(path.join(home, '.pi', 'agent'), { recursive: true });
+        fs.writeFileSync(
+            path.join(home, '.pi', 'agent', 'models-store.json'),
+            JSON.stringify({
+                openai: {
+                    models: [
+                        {
+                            id: 'gpt-5.6-sol',
+                            provider: 'openai',
+                            api: 'openai-completions',
+                            baseUrl: 'https://x.example/v1',
+                            input: ['text', 'image'],
+                        },
+                    ],
+                },
+            }),
+        );
+        fs.writeFileSync(
+            path.join(home, '.pi', 'agent', 'auth.json'),
+            JSON.stringify({ openai: { type: 'api_key' } }),
+        );
+        const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-chain-cd-'));
+        const statePath = path.join(stateDir, 'state.json');
+        const now = new Date('2026-08-06T00:00:00.000Z');
+        recordQuotaCooldown(
+            emptyCooldownState(),
+            'gemini-api',
+            new ApiKeyFailureError('out of credits', { quotaCooldown: 'default' }),
+            now,
+            statePath,
+            undefined,
+            0,
+        );
+        recordQuotaCooldown(
+            emptyCooldownState(),
+            'gemini-api',
+            new ApiKeyFailureError('out of credits', { quotaCooldown: 'default' }),
+            now,
+            statePath,
+            undefined,
+            1,
+        );
+        const chain = composeChain(
+            'remote',
+            {
+                providers: { 'gemini-api': { apiKey: 'g1,g2' } },
+                reuse: { pi: true },
+            },
+            { env: { PATH: dir }, home },
+            buildCooldownController({}, { now, statePath }),
+        );
+        expect(chain.map((p) => p.name)).toEqual(['pi:openai', 'gemini-api', 'antigravity-cli']);
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(home, { recursive: true, force: true });
+        fs.rmSync(stateDir, { recursive: true, force: true });
     });
 });
 
@@ -919,5 +1017,466 @@ describe('cleaning up a throwaway directory never aborts the process (#58)', () 
             fs.chmodSync(root, 0o700);
             await fs.promises.rm(root, { recursive: true, force: true });
         }
+    });
+});
+
+describe('per-provider API key rotation', () => {
+    const CONTRACT_RESULT = {
+        summary: 'ok',
+        ocr: { full_text: '', lines: [] },
+        layout: { regions: [] },
+        semantics: { scene: '', entities: [] },
+        visual: {},
+        uncertainty: [],
+    };
+
+    let image: string;
+    const dirs: string[] = [];
+
+    const geminiOk = () =>
+        new Response(
+            JSON.stringify({
+                candidates: [{ content: { parts: [{ text: JSON.stringify(CONTRACT_RESULT) }] } }],
+                usageMetadata: { totalTokenCount: 9 },
+            }),
+            { status: 200 },
+        );
+
+    function bearerKey(init: RequestInit | undefined): string {
+        const headers = init?.headers;
+        let auth = '';
+        if (headers instanceof Headers) {
+            auth = headers.get('Authorization') ?? headers.get('authorization') ?? '';
+        } else if (headers && typeof headers === 'object' && !Array.isArray(headers)) {
+            const rec = headers as Record<string, string>;
+            auth = rec.Authorization ?? rec.authorization ?? '';
+        }
+        return auth.replace(/^Bearer\s+/i, '');
+    }
+
+    function googKey(init: RequestInit | undefined): string {
+        const headers = init?.headers;
+        if (headers instanceof Headers) {
+            return headers.get('x-goog-api-key') ?? '';
+        }
+        if (headers && typeof headers === 'object' && !Array.isArray(headers)) {
+            return (headers as Record<string, string>)['x-goog-api-key'] ?? '';
+        }
+        return '';
+    }
+
+    afterEach(() => {
+        vi.unstubAllGlobals();
+        while (dirs.length > 0) {
+            fs.rmSync(dirs.pop() as string, { recursive: true, force: true });
+        }
+    });
+
+    function tmpImage(): string {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-rot-'));
+        dirs.push(dir);
+        const file = path.join(dir, 'shot.png');
+        fs.writeFileSync(file, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+        image = file;
+        return file;
+    }
+
+    it.each([401, 403, 429])(
+        'tries comma-separated keys in order after a key-related HTTP %i failure',
+        async (status) => {
+            tmpImage();
+            const sentKeys: string[] = [];
+            vi.stubGlobal(
+                'fetch',
+                vi.fn(async (_url: string, init: RequestInit) => {
+                    sentKeys.push(googKey(init));
+                    if (sentKeys.length === 1) {
+                        return new Response('invalid API key', { status });
+                    }
+                    return geminiOk();
+                }),
+            );
+
+            const result = await analyzeImage({
+                input: image,
+                provider: 'gemini-api',
+                config: { providers: { 'gemini-api': { apiKey: ' first-key, ,second-key ' } } },
+                timeoutMs: 20_000,
+            });
+
+            expect(sentKeys).toEqual(['first-key', 'second-key']);
+            expect(result.meta.attempts).toMatchObject([
+                { provider: 'gemini-api', keyIndex: 0, ok: false },
+                { provider: 'gemini-api', keyIndex: 1, ok: true },
+            ]);
+            expect(result.meta.warnings.join(' ')).toContain('Rotated to gemini-api API key 2');
+            expect(result.meta.warnings.join(' ')).not.toContain('Failed over to gemini-api');
+        },
+    );
+
+    it('still rotates when the 401 body stream throws', async () => {
+        tmpImage();
+        const sentKeys: string[] = [];
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async (_url: string, init: RequestInit) => {
+                sentKeys.push(googKey(init));
+                return {
+                    ok: false,
+                    status: 401,
+                    text: async () => {
+                        throw new Error('stream closed');
+                    },
+                };
+            }),
+        );
+
+        await expect(
+            analyzeImage({
+                input: image,
+                provider: 'gemini-api',
+                config: {
+                    providers: { 'gemini-api': { apiKey: 'first-key-aaaa,second-key-bbbb' } },
+                },
+                timeoutMs: 20_000,
+            }),
+        ).rejects.toBeTruthy();
+        expect(sentKeys).toEqual(['first-key-aaaa', 'second-key-bbbb']);
+    });
+
+    it('rotates and cools a 402 whose quota flag sits past the 300-char display clip', async () => {
+        tmpImage();
+        const p = path.join(
+            fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-late-quota-')),
+            'state.json',
+        );
+        dirs.push(path.dirname(p));
+        const now = new Date('2026-08-06T00:00:00.000Z');
+        const lateQuota = `${'x'.repeat(350)} insufficient balance`;
+        const sentKeys: string[] = [];
+        const openaiOk = () =>
+            new Response(
+                JSON.stringify({
+                    choices: [{ message: { content: JSON.stringify(CONTRACT_RESULT) } }],
+                }),
+                { status: 200 },
+            );
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async (_url: string, init: RequestInit) => {
+                sentKeys.push(bearerKey(init));
+                if (sentKeys.length === 1) {
+                    return new Response(lateQuota, { status: 402 });
+                }
+                return openaiOk();
+            }),
+        );
+        const controller = buildCooldownController({}, { now, statePath: p });
+
+        const result = await analyzeImage({
+            input: image,
+            provider: 'openai',
+            config: {
+                providers: {
+                    openai: {
+                        apiKey: 'first-key-aaaa,second-key-bbbb',
+                        baseUrl: 'https://gw.example.com/v1',
+                        model: 'vision-model',
+                    },
+                },
+            },
+            timeoutMs: 20_000,
+            cooldown: controller,
+        });
+
+        expect(sentKeys).toEqual(['first-key-aaaa', 'second-key-bbbb']);
+        expect(result.meta.attempts[0]).toMatchObject({
+            provider: 'openai',
+            keyIndex: 0,
+            ok: false,
+        });
+        expect(result.meta.attempts[0].error).not.toContain('insufficient balance');
+        expect(result.meta.attempts[0].error?.length).toBeLessThanOrEqual(300);
+        expect(result.meta.warnings.join(' ')).toContain('Rotated to openai API key 2');
+        const entry = loadCooldownState(p).engineCooldowns[cooldownStateKey('openai', 0)];
+        expect(entry).toBeDefined();
+        expect(Date.parse(entry.until) - now.getTime()).toBe(DEFAULT_COOLDOWN_MS);
+    });
+
+    it('does not try another key after a network failure', async () => {
+        tmpImage();
+        const fetchMock = vi.fn(async () => {
+            throw new Error('network unavailable');
+        });
+        vi.stubGlobal('fetch', fetchMock);
+
+        await expect(
+            analyzeImage({
+                input: image,
+                provider: 'gemini-api',
+                config: { providers: { 'gemini-api': { apiKey: 'first-key,second-key' } } },
+                timeoutMs: 20_000,
+            }),
+        ).rejects.toThrow(/network unavailable/);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not try another key after a 5xx response, even when its body mentions quota', async () => {
+        tmpImage();
+        const fetchMock = vi.fn(
+            async () => new Response('quota service temporarily unavailable', { status: 503 }),
+        );
+        vi.stubGlobal('fetch', fetchMock);
+
+        await expect(
+            analyzeImage({
+                input: image,
+                provider: 'gemini-api',
+                config: { providers: { 'gemini-api': { apiKey: 'first-key,second-key' } } },
+                timeoutMs: 20_000,
+            }),
+        ).rejects.toThrow(/Gemini API error 503/);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not record cooldown for a 503 whose body mentions quota', async () => {
+        tmpImage();
+        const p = path.join(
+            fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-503-state-')),
+            'state.json',
+        );
+        dirs.push(path.dirname(p));
+        const now = new Date('2026-08-06T00:00:00.000Z');
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(
+                async () => new Response('quota service temporarily unavailable', { status: 503 }),
+            ),
+        );
+        const controller = buildCooldownController({}, { now, statePath: p });
+
+        await expect(
+            analyzeImage({
+                input: image,
+                provider: 'gemini-api',
+                config: { providers: { 'gemini-api': { apiKey: 'only-key-aaaa' } } },
+                timeoutMs: 20_000,
+                cooldown: controller,
+            }),
+        ).rejects.toThrow(/Gemini API error 503/);
+        expect(fs.existsSync(p)).toBe(false);
+        expect(controller?.state.engineCooldowns).toEqual({});
+    });
+
+    it('records a 24-hour cooldown for HTTP 432 even when the message has no letters HTTP', async () => {
+        tmpImage();
+        const p = path.join(
+            fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-432-state-')),
+            'state.json',
+        );
+        dirs.push(path.dirname(p));
+        const now = new Date('2026-08-06T00:00:00.000Z');
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async () => new Response('plan cap', { status: 432 })),
+        );
+        const controller = buildCooldownController({}, { now, statePath: p });
+
+        await expect(
+            analyzeImage({
+                input: image,
+                provider: 'gemini-api',
+                config: { providers: { 'gemini-api': { apiKey: 'only-key-aaaa' } } },
+                timeoutMs: 20_000,
+                cooldown: controller,
+            }),
+        ).rejects.toThrow(/Gemini API error 432/);
+        const entry = loadCooldownState(p).engineCooldowns[cooldownStateKey('gemini-api', 0)];
+        expect(entry).toBeDefined();
+        expect(Date.parse(entry.until) - now.getTime()).toBe(MONTHLY_COOLDOWN_MS);
+    });
+
+    it('does not treat unrelated 4xx wording as a quota failure', async () => {
+        tmpImage();
+        const fetchMock = vi.fn(
+            async () => new Response('requested result count is out of range', { status: 400 }),
+        );
+        vi.stubGlobal('fetch', fetchMock);
+
+        await expect(
+            analyzeImage({
+                input: image,
+                provider: 'gemini-api',
+                config: { providers: { 'gemini-api': { apiKey: 'first-key,second-key' } } },
+                timeoutMs: 20_000,
+            }),
+        ).rejects.toThrow(/Gemini API error 400/);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not leak a sibling key through the rethrown lastError', async () => {
+        tmpImage();
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async () => new Response('rejected second-key-bbbb as invalid', { status: 401 })),
+        );
+
+        const error = await analyzeImage({
+            input: image,
+            provider: 'gemini-api',
+            config: {
+                providers: { 'gemini-api': { apiKey: 'first-key-aaaa,second-key-bbbb' } },
+            },
+            timeoutMs: 20_000,
+        }).catch((caught: unknown) => caught);
+
+        expect(error).toBeInstanceOf(ApiKeyFailureError);
+        expect((error as Error).message).not.toContain('second-key-bbbb');
+        expect((error as Error).message).not.toContain('first-key-aaaa');
+    });
+
+    it('does not leak a sibling key into cooldown state or doctor output', async () => {
+        tmpImage();
+        const p = path.join(
+            fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-leak-state-')),
+            'state.json',
+        );
+        dirs.push(path.dirname(p));
+        const now = new Date('2026-08-06T00:00:00.000Z');
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(
+                async () =>
+                    new Response('insufficient balance for second-key-bbbb', { status: 402 }),
+            ),
+        );
+        const controller = buildCooldownController({}, { now, statePath: p });
+
+        const error = await analyzeImage({
+            input: image,
+            provider: 'gemini-api',
+            config: {
+                providers: { 'gemini-api': { apiKey: 'first-key-aaaa,second-key-bbbb' } },
+            },
+            timeoutMs: 20_000,
+            cooldown: controller,
+        }).catch((caught: unknown) => caught);
+
+        expect(error).toBeInstanceOf(ApiKeyFailureError);
+        expect((error as Error).message).not.toContain('second-key-bbbb');
+        const persisted = fs.readFileSync(p, 'utf-8');
+        expect(persisted).not.toContain('second-key-bbbb');
+        expect(persisted).not.toContain('first-key-aaaa');
+
+        const { buildDoctorReport, renderDoctorReport } = await import('./doctor.ts');
+        const report = buildDoctorReport({
+            config: {
+                providers: { 'gemini-api': { apiKey: 'first-key-aaaa,second-key-bbbb' } },
+            },
+            env: {},
+            statePath: p,
+            now,
+        });
+        expect(JSON.stringify(report.cooldown)).not.toContain('second-key-bbbb');
+        expect(renderDoctorReport(report)).not.toContain('second-key-bbbb');
+    });
+
+    it('records quota cooldown only for the key that failed', async () => {
+        tmpImage();
+        const p = path.join(
+            fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-key-state-')),
+            'state.json',
+        );
+        dirs.push(path.dirname(p));
+        const now = new Date('2026-08-06T00:00:00.000Z');
+        let call = 0;
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async () => {
+                call += 1;
+                if (call === 1) {
+                    return new Response('insufficient balance for first-key and second-key', {
+                        status: 402,
+                    });
+                }
+                return geminiOk();
+            }),
+        );
+        const controller = buildCooldownController({}, { now, statePath: p });
+
+        await analyzeImage({
+            input: image,
+            provider: 'gemini-api',
+            config: { providers: { 'gemini-api': { apiKey: 'first-key,second-key' } } },
+            timeoutMs: 20_000,
+            cooldown: controller,
+        });
+
+        const state = loadCooldownState(p);
+        expect(state.engineCooldowns[cooldownStateKey('gemini-api', 0)]).toBeDefined();
+        expect(state.engineCooldowns[cooldownStateKey('gemini-api', 1)]).toBeUndefined();
+        expect(state.engineCooldowns['gemini-api']).toBeUndefined();
+        const persisted = fs.readFileSync(p, 'utf-8');
+        expect(persisted).not.toContain('first-key');
+        expect(persisted).not.toContain('second-key');
+    });
+
+    it('tries healthy keys before a cooling key in the same provider', async () => {
+        tmpImage();
+        const p = path.join(
+            fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-key-order-')),
+            'state.json',
+        );
+        dirs.push(path.dirname(p));
+        const now = new Date('2026-08-06T00:00:00.000Z');
+        recordQuotaCooldown(
+            emptyCooldownState(),
+            'gemini-api',
+            new ApiKeyFailureError('out of credits', { quotaCooldown: 'default' }),
+            now,
+            p,
+            undefined,
+            0,
+        );
+        const sentKeys: string[] = [];
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async (_url: string, init: RequestInit) => {
+                sentKeys.push(googKey(init));
+                return geminiOk();
+            }),
+        );
+
+        const result = await analyzeImage({
+            input: image,
+            provider: 'gemini-api',
+            config: { providers: { 'gemini-api': { apiKey: 'first-key,second-key' } } },
+            timeoutMs: 20_000,
+            cooldown: buildCooldownController({}, { now, statePath: p }),
+        });
+
+        expect(sentKeys).toEqual(['second-key']);
+        expect(result.meta.attempts).toMatchObject([{ keyIndex: 1, ok: true }]);
+        expect(
+            loadCooldownState(p).engineCooldowns[cooldownStateKey('gemini-api', 0)],
+        ).toBeDefined();
+    });
+
+    it('omits keyIndex on a single-key success so the JSON stays compatible', async () => {
+        tmpImage();
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async () => geminiOk()),
+        );
+        const result = await analyzeImage({
+            input: image,
+            provider: 'gemini-api',
+            config: { providers: { 'gemini-api': { apiKey: 'only-key' } } },
+            timeoutMs: 20_000,
+        });
+        expect(result.meta.attempts).toHaveLength(1);
+        expect(result.meta.attempts[0].ok).toBe(true);
+        expect(result.meta.attempts[0].keyIndex).toBeUndefined();
+        expect(JSON.stringify(result.meta.attempts[0])).not.toContain('keyIndex');
     });
 });

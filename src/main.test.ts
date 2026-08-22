@@ -14,6 +14,7 @@ const cli = path.join(root, 'dist', 'main.js');
 // The bound env vars leak into `config show`; strip them for a clean baseline.
 const BOUND_ENV = [
     'GEMINI_API_KEY',
+    'GEMINI_BASE_URL',
     'OPENAI_API_KEY',
     'OPENAI_BASE_URL',
     'ANTHROPIC_API_KEY',
@@ -25,6 +26,9 @@ function baseEnv(overrides: Record<string, string> = {}): NodeJS.ProcessEnv {
     for (const key of BOUND_ENV) {
         delete env[key];
     }
+    // The CLI child should not inherit a test-runner colour pair that makes
+    // Node print "NO_COLOR is ignored due to FORCE_COLOR" on stderr.
+    delete env.FORCE_COLOR;
     return { ...env, ...overrides };
 }
 
@@ -257,7 +261,7 @@ describe('config show', () => {
         // other, and the config dir hangs off it.
         const { code, stdout } = run(['config', 'show'], { HOME: home, USERPROFILE: home });
         expect(code).toBe(0);
-        expect(JSON.parse(stdout)).toEqual({ providers: {} });
+        expect(JSON.parse(stdout)).toEqual({ providers: {}, cooldown: 'on (default)' });
         fs.rmSync(home, { recursive: true, force: true });
     });
 
@@ -276,6 +280,29 @@ describe('config show', () => {
         // config show exists to be pasted into issues.
         expect(parsed.providers?.['gemini-api']?.apiKey).toMatch(/\(env\)$/);
         expect(stdout).not.toContain('SecretFromEnv');
+        fs.rmSync(home, { recursive: true, force: true });
+    });
+});
+
+describe('state clear', () => {
+    it('deletes the cooldown state file and prints the path', () => {
+        const home = fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-home-'));
+        const dir = path.join(home, '.modlens');
+        fs.mkdirSync(dir);
+        const statePath = path.join(dir, 'state.json');
+        fs.writeFileSync(statePath, JSON.stringify({ engineCooldowns: { openai: {} } }));
+        const { code, stdout } = run(['state', 'clear'], { HOME: home, USERPROFILE: home });
+        expect(code).toBe(0);
+        expect(stdout).toContain(`Cleared cooldown state (${statePath}).`);
+        expect(fs.existsSync(statePath)).toBe(false);
+        fs.rmSync(home, { recursive: true, force: true });
+    });
+
+    it('succeeds when the file is already missing', () => {
+        const home = fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-home-'));
+        const { code, stdout } = run(['state', 'clear'], { HOME: home, USERPROFILE: home });
+        expect(code).toBe(0);
+        expect(stdout).toMatch(/Cleared cooldown state/);
         fs.rmSync(home, { recursive: true, force: true });
     });
 });

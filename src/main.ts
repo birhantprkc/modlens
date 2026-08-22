@@ -15,6 +15,7 @@ import {
     setConfigValue,
     useProviderBundle,
 } from './config.ts';
+import { buildCooldownController, clearAllCooldowns, currentStatePath } from './cooldown.ts';
 import { buildDoctorReport, renderDoctorReport } from './doctor.ts';
 import { runGuard } from './guard/index.ts';
 import { listProviders } from './providers/index.ts';
@@ -90,6 +91,7 @@ program
                     ? parseExtraBody(options.extraBody, '--extra-body')
                     : undefined,
                 config,
+                cooldown: buildCooldownController(config),
             });
 
             const output = JSON.stringify(result, null, 2);
@@ -221,6 +223,7 @@ config
                     `Created ${CONFIG_PATH}`,
                     'Everything is optional. The usual ones:',
                     '  modlens config set provider <name>                      which provider analyzes images',
+                    '  modlens config set cooldown on|off                       quota cooldown (on by default)',
                     '  modlens config set <provider>.<apiKey|baseUrl|model> <value>   provider settings',
                     '  modlens config set <provider>.extraBody \'{"thinking":{"type":"disabled"}}\'   vendor request fields',
                     '',
@@ -305,6 +308,28 @@ config
     .action(() => {
         try {
             process.stdout.write(`${renderEffectiveConfig(loadConfigFile())}\n`);
+        } catch (error) {
+            process.stderr.write(
+                `Error: ${error instanceof Error ? error.message : String(error)}\n`,
+            );
+            process.exitCode = 1;
+        }
+    });
+
+const state = program
+    .command('state')
+    .description('Manage the quota cooldown state at ~/.modlens/state.json');
+
+state
+    .command('clear')
+    .description(
+        'Forget every provider cooldown, so all providers are tried at full priority again',
+    )
+    .action(() => {
+        try {
+            const statePath = currentStatePath();
+            clearAllCooldowns(statePath);
+            process.stdout.write(`Cleared cooldown state (${statePath}).\n`);
         } catch (error) {
             process.stderr.write(
                 `Error: ${error instanceof Error ? error.message : String(error)}\n`,

@@ -332,6 +332,15 @@ describe('settings card (#39)', () => {
     // switch, both found by review rather than by the browser.
     const SOURCE_TEXT = fs.readFileSync(path.join(__dirname, '..', 'dsh', 'client.js'), 'utf-8');
 
+    it('explains comma-separated key rotation in English and Chinese', () => {
+        expect(SOURCE_TEXT).toContain(
+            'Separate multiple keys with commas. ModLens rotates to the next key after authentication, rate-limit, or quota failures.',
+        );
+        expect(SOURCE_TEXT).toContain(
+            '多个密钥用英文逗号分隔。鉴权、限流或配额失败时会自动轮换到下一个密钥。',
+        );
+    });
+
     function loadCard(configStatus: number) {
         const slotRegistrations: string[] = [];
         const slotSpecs: Array<Record<string, unknown>> = [];

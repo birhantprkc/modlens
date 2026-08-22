@@ -8,6 +8,7 @@ import { readLocalImageBase64 } from '../imageInput.ts';
 import { apiFetch } from '../net/proxy.ts';
 import { buildVisionPrompt, JSON_TEMPLATE_INSTRUCTION } from '../prompt.ts';
 import { missingSchemaFields, normalizeVisionResult, visionResponseFormat } from '../schema.ts';
+import { errorFromApiStatus, splitApiKeys } from '../util/apiKeys.ts';
 import { mergeExtraBody } from '../util/extraBody.ts';
 import { extractJson, tail, truncate } from '../util/json.ts';
 import { redactSecrets } from '../util/redact.ts';
@@ -88,7 +89,9 @@ export async function executeOpenaiCompat(
     options: BuildProviderInvocationOptions,
 ): Promise<ProviderParsedOutput> {
     assertNoRetiredEndpointBinding('openai', options.settings ?? {});
-    const apiKey = options.settings?.apiKey;
+    const apiKeys = splitApiKeys(options.settings?.apiKey);
+    const apiKey = apiKeys[0];
+    const apiKeySecrets = [...new Set([...apiKeys, ...(options.apiKeySecrets ?? [])])];
     // No default on purpose. Defaulting to official OpenAI would take a key
     // meant for another vendor, and the image beside it, and send both to
     // OpenAI, which is the same fault issue #42 fixed pointed the other way:
@@ -168,11 +171,15 @@ ${JSON_TEMPLATE_INSTRUCTION}`;
     // nothing for the shape rules to catch, so a boundary landing inside the
     // hostname published it.
     const quote = (shown: string, clip: (text: string) => string = truncate): string =>
-        clip(redactSecrets(shown, [apiKey, baseUrl]));
+        clip(redactSecrets(shown, [...apiKeySecrets, baseUrl]));
 
     if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`OpenAI-compatible API error ${response.status}: ${quote(body)}`);
+        const body = (await response.text().catch(() => '')).trim();
+        // Classify on the full redacted body. Truncating first hid quota
+        // flags and reset clauses that sat past the 300-char display clip.
+        const detail = redactSecrets(body, [...apiKeySecrets, baseUrl]);
+        const message = `OpenAI-compatible API error ${response.status}: ${truncate(detail)}`;
+        throw errorFromApiStatus(response.status, message, detail);
     }
 
     const payload = (await response.json()) as {

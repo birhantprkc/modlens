@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { buildVisionPrompt } from '../prompt.ts';
 import { visionResultSchemaJson } from '../schema.ts';
+import { ApiKeyFailureError, parseResetDuration } from '../util/apiKeys.ts';
 import { parseJsonLoose, tryParseJson } from '../util/json.ts';
 import type {
     BuildProviderInvocationOptions,
@@ -109,7 +110,7 @@ const SWITCH_HINT = `Or switch to a provider with its own quota and no interacti
  * only "Agent execution terminated due to error." The distinguishing evidence
  * lives in agy's log file, so read it before guessing (issue #3).
  */
-export function describeAntigravityFailure(context: ProviderFailureContext): string | null {
+export function describeAntigravityFailure(context: ProviderFailureContext): string | Error | null {
     // Only lines written after this run started can describe this run. A
     // two-minute window alone let a previous quota failure, or a concurrent
     // agy call, misdiagnose an unrelated error.
@@ -129,11 +130,16 @@ export function describeAntigravityFailure(context: ProviderFailureContext): str
     const evidence = `${agyError}\n${context.stderr}\n${readRecentAgyLog(since)}`.toLowerCase();
 
     if (evidence.includes('quota')) {
-        return [
+        const text = [
             agyError || 'Antigravity CLI reported a quota error.',
             "agy's free tier is one weekly bucket shared by the desktop app, the CLI, and the SDK, and subagents drain it in parallel. Wait for the reset shown above, or use a different provider.",
             SWITCH_HINT,
         ].join('\n\n');
+        const resetSource = `${agyError}\n${context.stderr}\n${readRecentAgyLog(since)}`;
+        return new ApiKeyFailureError(text, {
+            quotaCooldown: 'default',
+            resetAfterMs: parseResetDuration(resetSource) ?? parseResetDuration(text),
+        });
     }
 
     if (

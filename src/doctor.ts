@@ -8,13 +8,20 @@ import { type DiscoverOptions, discoverAuto, type HarnessProbe } from './auto/di
 import {
     assertReadableConfig,
     CONFIG_PATH,
+    cooldownEnabled,
+    knownApiKeys,
     type ModlensConfig,
     providerConfiguredInFile,
     REUSE_HARNESSES,
     type ReuseHarness,
     resolveProviderSettings,
 } from './config.ts';
-
+import {
+    coolingEntry,
+    currentStatePath,
+    loadCooldownState,
+    parseCooldownStateKey,
+} from './cooldown.ts';
 import { detectActiveModel } from './guard/index.ts';
 import { allowPatterns, denyPatterns, evaluateGuard, type ModelSource } from './guard/rules.ts';
 import {
@@ -25,6 +32,8 @@ import {
 import { resolveProvider } from './providers/index.ts';
 import { detectHarnessDetailed, type HarnessSource } from './recoverPaste/detect.ts';
 import { findSkillInstalls, type SkillInstall } from './skillPin.ts';
+import { splitApiKeys } from './util/apiKeys.ts';
+import { redactSecrets } from './util/redact.ts';
 
 /** The lowest Node this release supports (see package.json engines). */
 export const MIN_NODE = '22.19';
@@ -36,6 +45,8 @@ export interface DoctorSettingStatus {
     present: boolean;
     source: SettingSource;
     env?: string;
+    /** Present for apiKey when at least one key is configured. */
+    keyCount?: number;
 }
 
 export interface DoctorProvider {
@@ -93,12 +104,26 @@ export interface DoctorReport {
         permissionsOk: boolean;
         note?: string;
     };
+    /** Quota cooldown: the switch state and every provider or key cooling right now. */
+    cooldown: { enabled: boolean; statePath: string; providers: CooldownDiagnosis[] };
     /** Borrow state: per-harness grant decisions plus what discovery found. */
     reuse: {
         /** claude absent counts as granted (claude-cli predates the model). */
         decisions: Record<ReuseHarness, 'granted' | 'refused' | 'not asked'>;
         probes: HarnessProbe[];
     };
+}
+
+/** One provider that is currently cooling, with how long is left. */
+export interface CooldownDiagnosis {
+    provider: string;
+    /** Zero-based API key index for per-key cooldowns. Absent on legacy provider cooldowns. */
+    keyIndex?: number;
+    /** ISO time it may recover. */
+    until: string;
+    /** Human remaining time, e.g. "1h 30m" or "45m". */
+    remaining: string;
+    reason: string;
 }
 
 export interface DoctorInput {
@@ -112,6 +137,10 @@ export interface DoctorInput {
     version?: string;
     /** Home override for the skill-copy scan, mainly for tests. */
     home?: string;
+    /** Cooldown state file. Injectable for tests. */
+    statePath?: string;
+    /** Clock for remaining-time math. Injectable for tests. */
+    now?: Date;
 }
 
 /** Parse "v24.13.0" or "22.13" into [major, minor]. */
@@ -191,6 +220,15 @@ function inspectProvider(
         // One provider, one source (issue #42): resolveProviderSettings has
         // already chosen it, so the label follows that choice rather than
         // re-deciding per field, which is how halves used to get mixed.
+        if (req.field === 'apiKey') {
+            const keys = splitApiKeys(settings.apiKey);
+            return {
+                field: req.field,
+                present: keys.length > 0,
+                source: keys.length > 0 ? settingsSource : 'missing',
+                ...(keys.length > 0 ? { keyCount: keys.length } : {}),
+            };
+        }
         const value = settings[req.field]?.trim();
         return {
             field: req.field,
@@ -201,7 +239,14 @@ function inspectProvider(
     const missing = statuses.filter((s) => !s.present).map((s) => s.field);
     const ready = missing.length === 0;
     const detail = ready
-        ? statuses.map((s) => `${s.field}: ${s.source}`).join(', ')
+        ? statuses
+              .map((s) => {
+                  if (s.field === 'apiKey' && s.present && s.keyCount) {
+                      return `${s.field}: ${s.source} (${s.keyCount} ${s.keyCount === 1 ? 'key' : 'keys'})`;
+                  }
+                  return `${s.field}: ${s.source}`;
+              })
+              .join(', ')
         : `missing: ${missing.join(', ')}`;
     return {
         name: descriptor.name,
@@ -278,9 +323,53 @@ function inspectConfigFile(configPath: string): DoctorReport['config'] {
     }
 }
 
+/** The providers cooling right now, plus whether the switch is even on. */
+function diagnoseCooldown(
+    config: ModlensConfig,
+    statePath: string,
+    now: Date,
+    env: NodeJS.ProcessEnv,
+): DoctorReport['cooldown'] {
+    if (!cooldownEnabled(config)) {
+        return { enabled: false, statePath, providers: [] };
+    }
+    const state = loadCooldownState(statePath);
+    const secrets = knownApiKeys(config, env);
+    const providers: CooldownDiagnosis[] = [];
+    for (const stateKey of Object.keys(state.engineCooldowns)) {
+        const target = parseCooldownStateKey(stateKey);
+        const entry = coolingEntry(state, target.engine, now, target.keyIndex);
+        if (entry) {
+            providers.push({
+                provider: target.engine,
+                ...(target.keyIndex === undefined ? {} : { keyIndex: target.keyIndex }),
+                until: entry.until,
+                remaining: formatRemaining(Date.parse(entry.until) - now.getTime()),
+                reason: redactSecrets(entry.reason, secrets).split('\n')[0].slice(0, 120),
+            });
+        }
+    }
+    providers.sort(
+        (a, b) => a.provider.localeCompare(b.provider) || (a.keyIndex ?? -1) - (b.keyIndex ?? -1),
+    );
+    return { enabled: true, statePath, providers };
+}
+
+function formatRemaining(ms: number): string {
+    if (ms <= 0) {
+        return '0m';
+    }
+    const totalMinutes = Math.round(ms / 60_000);
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
 export function buildDoctorReport(input: DoctorInput): DoctorReport {
     const env = input.env ?? process.env;
     const configPath = input.configPath ?? CONFIG_PATH;
+    const statePath = input.statePath ?? currentStatePath();
+    const now = input.now ?? new Date();
     // Same execute-boundary as a read: a malformed file fails in a sentence
     // naming the path, not as a TypeError inside a probe.
     assertReadableConfig(input.config, configPath);
@@ -300,6 +389,9 @@ export function buildDoctorReport(input: DoctorInput): DoctorReport {
     // probe result then feeds the chain composition below.
     const reuseDiscovery = discoverAuto({ env, fresh: true, ...input.auto });
     const reuseOptions = { env, ...input.auto, discovery: reuseDiscovery };
+    const cooldown = cooldownEnabled(input.config)
+        ? { state: loadCooldownState(statePath), now }
+        : undefined;
     return {
         node: {
             version: process.version,
@@ -313,8 +405,10 @@ export function buildDoctorReport(input: DoctorInput): DoctorReport {
         // labeled, so a machine living entirely on granted logins does not
         // read as "no engine" right next to a granted Reuse section.
         chains: {
-            local: composeChain('local', input.config, reuseOptions).map(chainEntryName),
-            remote: composeChain('remote', input.config, reuseOptions).map(chainEntryName),
+            local: composeChain('local', input.config, reuseOptions, cooldown).map(chainEntryName),
+            remote: composeChain('remote', input.config, reuseOptions, cooldown).map(
+                chainEntryName,
+            ),
         },
         harness: { detected: harnessDetection.harness, source: harnessDetection.source },
         skillInstalls: input.version ? findSkillInstalls(input.version, input.home) : [],
@@ -329,6 +423,7 @@ export function buildDoctorReport(input: DoctorInput): DoctorReport {
             reason: guardVerdict.reason,
         },
         config: inspectConfigFile(configPath),
+        cooldown: diagnoseCooldown(input.config, statePath, now, env),
         reuse: {
             decisions: Object.fromEntries(
                 REUSE_HARNESSES.map((harness) => {
@@ -390,6 +485,25 @@ export function renderDoctorReport(report: DoctorReport): string {
         chain.length > 0 ? chain.join(' -> ') : '(none available)';
     lines.push(`  local:  ${chainLine(report.chains.local)}`);
     lines.push(`  remote: ${chainLine(report.chains.remote)}`);
+    lines.push('');
+
+    lines.push('Cooldown');
+    if (!report.cooldown.enabled) {
+        lines.push('  switch: off (state not consulted)');
+    } else if (report.cooldown.providers.length === 0) {
+        lines.push('  switch: on');
+        lines.push('  no providers are cooling right now');
+    } else {
+        lines.push('  switch: on');
+        for (const c of report.cooldown.providers) {
+            const label =
+                c.keyIndex === undefined ? c.provider : `${c.provider} key ${c.keyIndex + 1}`;
+            lines.push(`  - ${label.padEnd(16)} cooling, ${c.remaining} left (until ${c.until})`);
+            if (c.reason) {
+                lines.push(`      reason: ${c.reason}`);
+            }
+        }
+    }
     lines.push('');
 
     lines.push('Harness');

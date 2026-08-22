@@ -6,6 +6,7 @@ import { readLocalImageBase64 } from '../imageInput.ts';
 import { apiFetch } from '../net/proxy.ts';
 import { buildVisionPrompt } from '../prompt.ts';
 import { VISION_RESULT_SCHEMA } from '../schema.ts';
+import { errorFromApiStatus, splitApiKeys } from '../util/apiKeys.ts';
 import { mergeExtraBody } from '../util/extraBody.ts';
 import { truncate } from '../util/json.ts';
 import { redactSecrets } from '../util/redact.ts';
@@ -23,7 +24,9 @@ export async function executeAnthropicApi(
     options: BuildProviderInvocationOptions,
 ): Promise<ProviderParsedOutput> {
     assertNoRetiredEndpointBinding('anthropic', options.settings ?? {});
-    const apiKey = options.settings?.apiKey;
+    const apiKeys = splitApiKeys(options.settings?.apiKey);
+    const apiKey = apiKeys[0];
+    const apiKeySecrets = [...new Set([...apiKeys, ...(options.apiKeySecrets ?? [])])];
     if (!apiKey) {
         throw new Error(
             'anthropic provider needs an API key. Run: modlens config set anthropic.apiKey and paste it at the hidden prompt',
@@ -98,10 +101,10 @@ Report your findings by calling the ${TOOL_NAME} tool.`;
     );
 
     if (!response.ok) {
-        const body = await response.text();
-        throw new Error(
-            `Anthropic API error ${response.status}: ${truncate(redactSecrets(body, [apiKey]))}`,
-        );
+        const body = (await response.text().catch(() => '')).trim();
+        const detail = redactSecrets(body, apiKeySecrets);
+        const message = `Anthropic API error ${response.status}: ${truncate(detail)}`;
+        throw errorFromApiStatus(response.status, message, detail);
     }
 
     const payload = (await response.json()) as {

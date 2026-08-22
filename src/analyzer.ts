@@ -9,8 +9,15 @@ import {
     assertReadableConfig,
     loadConfigFile,
     type ModlensConfig,
+    type ProviderSettings,
     resolveProviderSettings,
 } from './config.ts';
+import {
+    type CooldownController,
+    type CooldownView,
+    coolingEngineEntry,
+    coolingEntry,
+} from './cooldown.ts';
 import { providerChain } from './providers/availability.ts';
 import {
     type ProviderFailureContext,
@@ -20,6 +27,7 @@ import {
     type VisionProvider,
 } from './providers/index.ts';
 import { missingSchemaFields, normalizeVisionResult } from './schema.ts';
+import { isApiKeyFailure, splitApiKeys } from './util/apiKeys.ts';
 import { redactSecrets } from './util/redact.ts';
 import { spawnHidden } from './util/spawnHidden.ts';
 import { resolveSpawnPlan } from './util/winExec.ts';
@@ -37,10 +45,18 @@ export interface AnalyzeOptions {
     config?: ModlensConfig;
     /** Auto-mode discovery overrides (home, env, discovery), mainly for tests. */
     autoOptions?: AutoRouteOptions;
+    /**
+     * Quota cooldown for this run. Absent means the cooldown is off (the
+     * switch, or a caller that does not use it), and routing is exactly as it
+     * was before cooldowns existed.
+     */
+    cooldown?: CooldownController;
 }
 
 export interface AnalyzeAttempt {
     provider: string;
+    /** Zero-based configured key index. Present only when a provider has multiple keys. */
+    keyIndex?: number;
     ok: boolean;
     durationSeconds: number;
     error?: string;
@@ -98,11 +114,12 @@ export async function analyzeImage(options: AnalyzeOptions): Promise<AnalyzeResu
     // way. Otherwise the failover chain: every provider that is set up on
     // this machine plus the borrowed routes the user granted, merged by
     // region so a borrowed engine gets speed-class placement, not priority.
+    const controller = options.cooldown;
     const chain = options.provider
         ? [resolveProvider(options.provider)]
         : options.providerBin
           ? [resolveProvider('antigravity-cli')]
-          : composeChain(resolvedInput.kind, config, options.autoOptions);
+          : composeChain(resolvedInput.kind, config, options.autoOptions, controller);
     // A provider the user named carries the retired-binding check before the
     // chain is filtered. Otherwise the missing baseUrl reads as "not set up",
     // that provider is quietly dropped, and the person who exported the
@@ -135,37 +152,161 @@ export async function analyzeImage(options: AnalyzeOptions): Promise<AnalyzeResu
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const attempts: AnalyzeAttempt[] = [];
     const warnings: string[] = [];
+    if (controller && !options.provider && !options.providerBin) {
+        for (const provider of chain) {
+            const keyCount = splitApiKeys(
+                resolveProviderSettings(provider.name, config).apiKey,
+            ).length;
+            const entry = coolingEngineEntry(
+                controller.state,
+                provider.name,
+                keyCount,
+                controller.now,
+            );
+            if (entry) {
+                warnings.push(
+                    `The ${provider.name} provider is cooling until ${entry.until}, so it moves to the back of the fallback chain.`,
+                );
+            }
+        }
+    }
     let lastError: unknown;
 
     for (const provider of chain) {
-        const startedAt = Date.now();
-        // An explicit -m names one provider's model, so it applies to the
-        // first attempt only; a failover provider runs its own default, since
-        // model names do not carry across providers.
+        const configured = resolveProviderSettings(provider.name, config);
+        const settingsBase = options.extraBody
+            ? { ...configured, extraBody: options.extraBody }
+            : configured;
+        // An explicit -m names one provider's model, so it applies to every
+        // key of the first provider; a failover provider runs its own default.
+        const firstProvider = attempts.every((attempt) => attempt.provider === provider.name);
         const model =
-            (attempts.length === 0 ? options.model : undefined) ||
-            resolveProviderSettings(provider.name, config).model ||
+            (firstProvider ? options.model : undefined) ||
+            settingsBase.model ||
             provider.defaultModel;
-        try {
-            const parsed = await runProvider(
-                provider,
-                model,
-                options,
-                resolvedInput,
-                timeoutMs,
-                config,
-                warnings,
-            );
-            attempts.push({
-                provider: provider.name,
-                ok: true,
-                durationSeconds: (Date.now() - startedAt) / 1000,
-            });
-            if (provider.reuseNote) {
-                warnings.push(provider.reuseNote);
+        const apiKeys = splitApiKeys(settingsBase.apiKey);
+        const configuredKeyRuns =
+            apiKeys.length > 0
+                ? apiKeys.map((apiKey, keyIndex) => ({ apiKey, keyIndex }))
+                : [
+                      {
+                          apiKey: undefined as string | undefined,
+                          keyIndex: undefined as number | undefined,
+                      },
+                  ];
+        const keyRuns = controller
+            ? [
+                  ...configuredKeyRuns.filter(
+                      (run) =>
+                          run.keyIndex === undefined ||
+                          !coolingEntry(
+                              controller.state,
+                              provider.name,
+                              controller.now,
+                              run.keyIndex,
+                          ),
+                  ),
+                  ...configuredKeyRuns.filter(
+                      (run) =>
+                          run.keyIndex !== undefined &&
+                          coolingEntry(
+                              controller.state,
+                              provider.name,
+                              controller.now,
+                              run.keyIndex,
+                          ),
+                  ),
+              ]
+            : configuredKeyRuns;
+
+        let parsed: ProviderParsedOutput | undefined;
+        let successfulStartedAt = 0;
+        let successfulKeyIndex: number | undefined;
+        for (let runIndex = 0; runIndex < keyRuns.length; runIndex += 1) {
+            const keyRun = keyRuns[runIndex];
+            const startedAt = Date.now();
+            try {
+                parsed = await runProvider(
+                    provider,
+                    model,
+                    options,
+                    resolvedInput,
+                    timeoutMs,
+                    { ...settingsBase, apiKey: keyRun.apiKey },
+                    warnings,
+                    apiKeys,
+                );
+                successfulStartedAt = startedAt;
+                successfulKeyIndex = keyRun.keyIndex;
+                break;
+            } catch (error) {
+                const message = redactSecrets(
+                    error instanceof Error ? error.message : String(error),
+                    apiKeys,
+                );
+                if (error instanceof Error) {
+                    error.message = message;
+                }
+                lastError = error;
+                attempts.push({
+                    provider: provider.name,
+                    ...(apiKeys.length > 1 ? { keyIndex: keyRun.keyIndex } : {}),
+                    ok: false,
+                    durationSeconds: (Date.now() - startedAt) / 1000,
+                    error: message.slice(0, 300),
+                });
+                if (controller) {
+                    const entry = controller.record(provider.name, error, keyRun.keyIndex, apiKeys);
+                    if (entry) {
+                        const keyNote =
+                            keyRun.keyIndex === undefined ? '' : ` API key ${keyRun.keyIndex + 1}`;
+                        warnings.push(
+                            `The ${provider.name} provider${keyNote} hit its quota and is now cooling until ${entry.until}.`,
+                        );
+                    }
+                }
+                const hasNextKey = runIndex + 1 < keyRuns.length;
+                if (hasNextKey && isApiKeyFailure(error)) {
+                    continue;
+                }
+                break;
             }
-            if (attempts.length > 1) {
-                const failed = attempts.slice(0, -1);
+        }
+
+        if (!parsed) {
+            continue;
+        }
+
+        attempts.push({
+            provider: provider.name,
+            ...(apiKeys.length > 1 ? { keyIndex: successfulKeyIndex } : {}),
+            ok: true,
+            durationSeconds: (Date.now() - successfulStartedAt) / 1000,
+        });
+        controller?.clear(provider.name, successfulKeyIndex);
+        if (provider.reuseNote) {
+            warnings.push(provider.reuseNote);
+        }
+        warnings.push(...(controller?.warnings ?? []));
+        const failed = attempts.filter((attempt) => !attempt.ok);
+        if (failed.length > 0) {
+            const rotatedWithinProvider =
+                failed.every((attempt) => attempt.provider === provider.name) &&
+                successfulKeyIndex !== undefined;
+            if (rotatedWithinProvider && successfulKeyIndex !== undefined) {
+                warnings.push(
+                    `Rotated to ${provider.name} API key ${successfulKeyIndex + 1} after: ${failed
+                        .map(
+                            (attempt) =>
+                                `${attempt.provider}${
+                                    attempt.keyIndex === undefined
+                                        ? ''
+                                        : ` (API key ${attempt.keyIndex + 1})`
+                                }: ${attempt.error}`,
+                        )
+                        .join(' | ')}`,
+                );
+            } else {
                 warnings.push(
                     `Failed over to ${provider.name} after: ${failed
                         .map((attempt) => `${attempt.provider} (${attempt.error})`)
@@ -177,35 +318,24 @@ export async function analyzeImage(options: AnalyzeOptions): Promise<AnalyzeResu
                     );
                 }
             }
-            return {
-                image: resolvedInput.source,
-                provider: provider.name,
-                result: parsed.result,
-                meta: {
-                    generatedAt: new Date().toISOString(),
-                    // Empty means the provider ran whatever it was already
-                    // configured with and never told us which (kimi-cli), so
-                    // the field says unknown rather than naming nothing.
-                    model: model === '' ? null : model,
-                    conversationId: parsed.meta.conversationId,
-                    durationSeconds: parsed.meta.durationSeconds,
-                    usage: parsed.meta.usage,
-                    attempts,
-                    warnings,
-                },
-            };
-        } catch (error) {
-            lastError = error;
-            const message = error instanceof Error ? error.message : String(error);
-            attempts.push({
-                provider: provider.name,
-                ok: false,
-                durationSeconds: (Date.now() - startedAt) / 1000,
-                // Providers redact their own errors, but attempts travel into
-                // output and model contexts, so the record gets the belt too.
-                error: redactSecrets(message).slice(0, 300),
-            });
         }
+        return {
+            image: resolvedInput.source,
+            provider: provider.name,
+            result: parsed.result,
+            meta: {
+                generatedAt: new Date().toISOString(),
+                // Empty means the provider ran whatever it was already
+                // configured with and never told us which (kimi-cli), so
+                // the field says unknown rather than naming nothing.
+                model: model === '' ? null : model,
+                conversationId: parsed.meta.conversationId,
+                durationSeconds: parsed.meta.durationSeconds,
+                usage: parsed.meta.usage,
+                attempts,
+                warnings,
+            },
+        };
     }
 
     // A pinned or lone provider keeps its original, actionable error (agy's
@@ -241,6 +371,7 @@ export function composeChain(
     kind: 'local' | 'remote',
     config: ModlensConfig,
     autoOptions: AutoRouteOptions | undefined,
+    cooldown?: CooldownView,
 ): VisionProvider[] {
     const chain = [...providerChain(kind, config, autoOptions?.env ?? process.env)];
     const borrowed = reuseProviders(kind, config, autoOptions);
@@ -274,7 +405,52 @@ export function composeChain(
         const beforeClaude = last?.name === 'claude-cli' && preferredName !== 'claude-cli';
         chain.splice(beforeClaude ? chain.length - 1 : chain.length, 0, ...borrowed.agents);
     }
-    return chain;
+    if (!cooldown) {
+        return chain;
+    }
+    return reorderByCooldown(chain, cooldown, config, autoOptions?.env ?? process.env);
+}
+
+/**
+ * After borrowed routes have joined, move a fully-cooling provider to the
+ * back of its own region (inline vs agent). A flat whole-chain partition
+ * would let a cooling gemini-api fall behind antigravity-cli, and a remote
+ * URL would then be fetched by the agent, skipping the inline SSRF guards.
+ */
+function reorderByCooldown(
+    chain: VisionProvider[],
+    cooldown: CooldownView,
+    config: ModlensConfig,
+    env: NodeJS.ProcessEnv,
+): VisionProvider[] {
+    const tagged = chain.map((provider) => {
+        const keyCount = splitApiKeys(
+            resolveProviderSettings(provider.name, config, env).apiKey,
+        ).length;
+        return {
+            provider,
+            inline: !provider.isolateWorkdir,
+            cooling: Boolean(
+                coolingEngineEntry(cooldown.state, provider.name, keyCount, cooldown.now),
+            ),
+        };
+    });
+    const healthyThenCooling = (items: typeof tagged) => [
+        ...items.filter((item) => !item.cooling),
+        ...items.filter((item) => item.cooling),
+    ];
+    const inline = healthyThenCooling(tagged.filter((item) => item.inline));
+    const agents = healthyThenCooling(tagged.filter((item) => !item.inline));
+    const lead = tagged[0];
+    if (lead && !lead.inline && !lead.cooling) {
+        const restAgents = agents.filter((item) => item.provider.name !== lead.provider.name);
+        return [
+            lead.provider,
+            ...inline.map((item) => item.provider),
+            ...restAgents.map((item) => item.provider),
+        ];
+    }
+    return [...inline.map((item) => item.provider), ...agents.map((item) => item.provider)];
 }
 
 const REUSE_KEY_BY_HARNESS: Record<string, 'codex' | 'opencode' | 'pi' | 'grok'> = {
@@ -337,16 +513,10 @@ async function runProvider(
     options: AnalyzeOptions,
     resolvedInput: ResolvedInput,
     timeoutMs: number,
-    config: ModlensConfig,
+    settings: ProviderSettings,
     warnings: string[],
+    apiKeySecrets: readonly string[] = [],
 ): Promise<ProviderParsedOutput> {
-    const configured = resolveProviderSettings(provider.name, config);
-    // --extra-body replaces the configured object rather than merging into it:
-    // a partial override of vendor knobs is hard to reason about at the command
-    // line, and the flag is the more specific layer.
-    const settings = options.extraBody
-        ? { ...configured, extraBody: options.extraBody }
-        : configured;
     // The passthrough is a request-body field, so the two CLI agents have
     // nowhere to put it. Saying so beats letting the user believe thinking is
     // off when nothing was sent.
@@ -364,6 +534,7 @@ async function runProvider(
         workdir: options.workdir,
         timeoutMs,
         settings,
+        apiKeySecrets,
     };
 
     let parsed: ProviderParsedOutput;
@@ -555,7 +726,7 @@ export function runCommand(
     providerName: string,
     invocation: ProviderInvocation,
     timeoutMs: number,
-    describeFailure?: (context: ProviderFailureContext) => string | null,
+    describeFailure?: (context: ProviderFailureContext) => string | Error | null,
 ): Promise<CommandResult> {
     const runStartedAt = Date.now();
     return new Promise((resolve, reject) => {
@@ -649,6 +820,13 @@ export function runCommand(
                     describeFailure?.({ stdout, stderr, code, startedAt: runStartedAt }) ?? null;
                 // Both branches can quote subprocess stderr, and a CLI in a
                 // broken auth state loves to print its token there.
+                // Keep an Error from describeFailure so instanceof (quota
+                // classification) survives; only wrap a string into a new Error.
+                if (explained instanceof Error) {
+                    explained.message = redactSecrets(explained.message);
+                    reject(explained);
+                    return;
+                }
                 reject(
                     new Error(
                         redactSecrets(

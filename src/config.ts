@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import type { GuardsConfig } from './guard/rules.ts';
 import { listProviders, providerAliases, resolveProvider } from './providers/index.ts';
+import { splitApiKeys } from './util/apiKeys.ts';
 import { parseExtraBody } from './util/extraBody.ts';
 import { parseJsonOrExplain } from './util/json.ts';
 import { maskUrlCredentials, redactSecrets } from './util/redact.ts';
@@ -66,6 +67,13 @@ export interface ModlensConfig {
      * because it is the one slot users point at many different gateways.
      */
     saved?: Record<string, Record<string, ProviderSettings>>;
+    /**
+     * Quota cooldown switch: 'on' (default) or 'off'. On, a quota-spent
+     * provider is remembered and moved to the back of the fallback chain until
+     * it recovers. Off, nothing is read from or written to state.json and
+     * routing is unchanged.
+     */
+    cooldown?: string;
 }
 
 export const CONFIG_DIR = path.join(os.homedir(), '.modlens');
@@ -81,7 +89,7 @@ export const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
 // source, mention nothing and the environment is, which keeps a container that
 // only exports variables working with both halves still matching.
 const ENV_BINDINGS: Record<string, Partial<Record<ProviderStringField, string>>> = {
-    'gemini-api': { apiKey: 'GEMINI_API_KEY' },
+    'gemini-api': { apiKey: 'GEMINI_API_KEY', baseUrl: 'GEMINI_BASE_URL' },
     openai: { apiKey: 'OPENAI_API_KEY', baseUrl: 'OPENAI_BASE_URL' },
     anthropic: { apiKey: 'ANTHROPIC_API_KEY', baseUrl: 'ANTHROPIC_BASE_URL' },
 };
@@ -127,7 +135,8 @@ function envSettingsFor(providerName: string, env: NodeJS.ProcessEnv): ProviderS
         [ProviderStringField, string]
     >) {
         const value = env[variable]?.trim();
-        if (value) {
+        const present = field === 'apiKey' ? splitApiKeys(value).length > 0 : Boolean(value);
+        if (value && present) {
             settings[field] = value;
         }
     }
@@ -211,6 +220,21 @@ export function defaultProviderName(config: ModlensConfig): string {
     return config.provider?.trim() || 'antigravity-cli';
 }
 
+/** Whether the quota cooldown is active. On by default, off only when set to 'off'. */
+export function cooldownEnabled(config: ModlensConfig): boolean {
+    return config.cooldown?.trim().toLowerCase() !== 'off';
+}
+
+/**
+ * The canonical name for a provider, folding aliases (agy, gemini, ...).
+ * Own properties only: the aliases table is a plain object, and a bare index
+ * walks the prototype chain.
+ */
+export function canonicalProviderName(name: string): string {
+    const trimmed = name.trim().toLowerCase();
+    return foldProviderName(trimmed);
+}
+
 /**
  * Whether the config file names this provider, aliases included. An entry
  * holding nothing still counts: see fileKeysFor.
@@ -244,6 +268,12 @@ export function setConfigValue(dottedKey: string, value: string, configPath = CO
 
     if (dottedKey === 'provider') {
         config.provider = value;
+    } else if (dottedKey === 'cooldown') {
+        const normalized = value.trim().toLowerCase();
+        if (normalized !== 'on' && normalized !== 'off') {
+            throw new Error(`Invalid cooldown value: ${value}. Use on or off.`);
+        }
+        config.cooldown = normalized;
     } else if (dottedKey === 'proxy') {
         if (value.trim() === '') {
             delete config.proxy;
@@ -276,7 +306,7 @@ export function setConfigValue(dottedKey: string, value: string, configPath = CO
         const dot = dottedKey.indexOf('.');
         if (dot <= 0 || dot === dottedKey.length - 1) {
             throw new Error(
-                `Invalid config key: ${dottedKey}. Use "provider", "proxy", "reuse.<claude|codex|opencode|pi|grok>", "guards.<denyModels|allowModels|denyWhenUnknown>", or "<provider>.<apiKey|baseUrl|model|proxy|extraBody|structuredOutput>".`,
+                `Invalid config key: ${dottedKey}. Use "provider", "proxy", "cooldown", "reuse.<claude|codex|opencode|pi|grok>", "guards.<denyModels|allowModels|denyWhenUnknown>", or "<provider>.<apiKey|baseUrl|model|proxy|extraBody|structuredOutput>".`,
             );
         }
         const typedName = dottedKey.slice(0, dot);
@@ -389,6 +419,9 @@ export function assertReadableConfig(config: ModlensConfig, configPath = CONFIG_
     if (config.proxy !== undefined && typeof config.proxy !== 'string') {
         throw sentence('"proxy"', 'is not a string');
     }
+    if (config.cooldown !== undefined && typeof config.cooldown !== 'string') {
+        throw sentence('"cooldown"', 'is not a string');
+    }
     if (config.reuse !== undefined && !isPlainObject(config.reuse)) {
         throw sentence('"reuse"', 'is not an object');
     }
@@ -487,19 +520,23 @@ function redactValues<T>(value: T, keys: string[]): T {
 }
 
 /** Every API key the file or environment holds, active rows and saved copies. */
-function knownApiKeys(config: ModlensConfig, env: NodeJS.ProcessEnv = process.env): string[] {
+export function knownApiKeys(
+    config: ModlensConfig,
+    env: NodeJS.ProcessEnv = process.env,
+): string[] {
     const keys = new Set<string>();
     const providersRoot = isPlainObject(config.providers) ? config.providers : {};
     for (const entry of Object.values(providersRoot)) {
         if (isPlainObject(entry) && typeof entry.apiKey === 'string') {
-            keys.add(entry.apiKey);
+            for (const apiKey of splitApiKeys(entry.apiKey)) {
+                keys.add(apiKey);
+            }
         }
     }
     for (const bindings of Object.values(ENV_BINDINGS)) {
         const variable = (bindings as Partial<Record<ProviderStringField, string>>).apiKey;
-        const value = variable ? env[variable]?.trim() : undefined;
-        if (value) {
-            keys.add(value);
+        for (const apiKey of splitApiKeys(variable ? env[variable] : undefined)) {
+            keys.add(apiKey);
         }
     }
     const savedRoot = isPlainObject(config.saved) ? config.saved : {};
@@ -507,7 +544,9 @@ function knownApiKeys(config: ModlensConfig, env: NodeJS.ProcessEnv = process.en
         if (!isPlainObject(bundles)) continue;
         for (const bundle of Object.values(bundles)) {
             if (isPlainObject(bundle) && typeof bundle.apiKey === 'string') {
-                keys.add(bundle.apiKey);
+                for (const apiKey of splitApiKeys(bundle.apiKey)) {
+                    keys.add(apiKey);
+                }
             }
         }
     }
@@ -809,7 +848,14 @@ export function renderEffectiveConfig(
     // A provider configured only through the environment is still in effect,
     // so it belongs in a view of what is in effect.
     for (const [providerName, bindings] of Object.entries(ENV_BINDINGS)) {
-        if (Object.values(bindings).some((variable) => env[variable]?.trim())) {
+        if (
+            (Object.entries(bindings) as Array<[ProviderStringField, string]>).some(
+                ([field, variable]) => {
+                    const value = env[variable]?.trim();
+                    return field === 'apiKey' ? splitApiKeys(value).length > 0 : Boolean(value);
+                },
+            )
+        ) {
             providerNames.add(providerName);
         }
     }
@@ -846,8 +892,10 @@ export function renderEffectiveConfig(
         // redacted against this entry's key, because a key that also rides in
         // a gateway URL or a model note used to print in full one field over
         // from its own mask.
-        const entryKey = typeof effective.apiKey === 'string' ? effective.apiKey : undefined;
-        const guard = (shown: string): string => redactSecrets(shown, [entryKey]);
+        const entryKeys = splitApiKeys(
+            typeof effective.apiKey === 'string' ? effective.apiKey : undefined,
+        );
+        const guard = (shown: string): string => redactSecrets(shown, entryKeys);
         for (const field of STRING_FIELDS) {
             const value = effective[field];
             if (value === undefined) {
@@ -863,7 +911,7 @@ export function renderEffectiveConfig(
             // masked, and a proxy URL's userinfo is a credential too.
             const shown =
                 field === 'apiKey'
-                    ? maskKey(value)
+                    ? maskKeys(value)
                     : field === 'proxy'
                       ? maskUrlCredentials(guard(value))
                       : guard(value);
@@ -888,6 +936,7 @@ export function renderEffectiveConfig(
     const effective: {
         provider?: string;
         proxy?: string;
+        cooldown?: string;
         providers: Record<string, Record<string, string>>;
         saved?: string[];
         notes?: string[];
@@ -895,6 +944,7 @@ export function renderEffectiveConfig(
         reuse?: Record<string, string>;
     } = {
         providers,
+        cooldown: config.cooldown ? `${config.cooldown} (file)` : 'on (default)',
     };
     // Saved copies are inert data, but they hold keys, so the view names
     // them the way it names everything secret: present, masked, never shown.
@@ -923,7 +973,7 @@ export function renderEffectiveConfig(
                 bundle.apiKey === undefined
                     ? 'no key'
                     : typeof bundle.apiKey === 'string'
-                      ? `key ${maskKey(bundle.apiKey)}`
+                      ? `key ${maskKeys(bundle.apiKey)}`
                       : 'key (malformed: not a string)',
             ].filter(Boolean);
             savedRows.push(`${slot}/${label}: ${parts.join(' @ ')}`);
@@ -1014,4 +1064,9 @@ function maskKey(key: string): string {
         return '****';
     }
     return `${key.slice(0, 6)}...${key.slice(-2)}`;
+}
+
+function maskKeys(value: string): string {
+    const keys = splitApiKeys(value);
+    return keys.length > 0 ? keys.map(maskKey).join(', ') : '****';
 }

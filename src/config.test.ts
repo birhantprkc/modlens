@@ -18,6 +18,7 @@ import {
     useProviderBundle,
 } from './config.ts';
 import { listProviders } from './providers/index.ts';
+import { splitApiKeys } from './util/apiKeys.ts';
 
 describe('defaultProviderName', () => {
     it('falls back to antigravity-cli without config', () => {
@@ -628,6 +629,25 @@ describe('saved copies of the openai slot (#67)', () => {
         expect(view).not.toContain('sk-alibaba-123456');
     });
 
+    it('masks each key in a saved comma-separated apiKey, not the joined blob', () => {
+        const view = renderEffectiveConfig(
+            {
+                saved: {
+                    openai: {
+                        ark: { apiKey: 'first-key-aaaa,second-key-bbbb' },
+                    },
+                },
+            },
+            {},
+        );
+        expect(view).toContain('first-...aa');
+        expect(view).toContain('second...bb');
+        expect(view).toContain('first-...aa, second...bb');
+        expect(view).not.toContain('first-key-aaaa');
+        expect(view).not.toContain('second-key-bbbb');
+        expect(view).not.toContain('first-...bb');
+    });
+
     it('survives ordinary config set round-trips untouched', () => {
         const file = tmpConfig();
         seed(file, dashscope);
@@ -1232,6 +1252,7 @@ describe('every property name in the view is a constant (structural invariant)',
             'denyModels',
             'allowModels',
             'denyWhenUnknown',
+            'cooldown',
             ...listProviders(),
             ...REUSE_HARNESSES,
         ]);
@@ -1252,5 +1273,123 @@ describe('every property name in the view is a constant (structural invariant)',
         expect(view).toContain('weird-name');
         expect(view).toContain('strangerharness');
         expect(view).toContain('oddslot');
+    });
+});
+
+describe('comma-separated API keys', () => {
+    it('scrubs every key from a comma-separated API key setting', () => {
+        const first = 'alpha-secret-value';
+        const second = 'bravo-secret-value';
+        const config = {
+            providers: {
+                'gemini-api': {
+                    apiKey: `${first}, ${second}`,
+                    model: `copied ${first} and ${second}`,
+                },
+            },
+        };
+        const view = renderEffectiveConfig(config, {} as NodeJS.ProcessEnv);
+        expect(view).not.toContain(first);
+        expect(view).not.toContain(second);
+        expect(JSON.parse(view).providers['gemini-api'].apiKey).toMatch(/, /);
+    });
+
+    it('takes a comma list from the file whole and ignores GEMINI_API_KEY', () => {
+        const settings = resolveProviderSettings(
+            'gemini-api',
+            { providers: { 'gemini-api': { apiKey: 'file-key-aaaa,file-key-bbbb' } } },
+            { GEMINI_API_KEY: 'env-key-cccc,env-key-dddd' },
+        );
+        expect(splitApiKeys(settings.apiKey)).toEqual(['file-key-aaaa', 'file-key-bbbb']);
+    });
+
+    it('yields two keys from an env-only GEMINI_API_KEY list', () => {
+        const settings = resolveProviderSettings(
+            'gemini-api',
+            {},
+            { GEMINI_API_KEY: 'env-key-aaaa, env-key-bbbb' },
+        );
+        expect(splitApiKeys(settings.apiKey)).toEqual(['env-key-aaaa', 'env-key-bbbb']);
+    });
+
+    it('does not pick up the env when the file names gemini-api with an empty or hollow apiKey', () => {
+        expect(
+            resolveProviderSettings(
+                'gemini-api',
+                { providers: { 'gemini-api': { apiKey: '' } } },
+                { GEMINI_API_KEY: 'env-key-aaaa' },
+            ).apiKey,
+        ).toBe('');
+        expect(
+            resolveProviderSettings(
+                'gemini-api',
+                { providers: { 'gemini-api': {} } },
+                { GEMINI_API_KEY: 'env-key-aaaa' },
+            ).apiKey,
+        ).toBeUndefined();
+    });
+
+    it('treats an env value of only commas as no key', () => {
+        const settings = resolveProviderSettings('gemini-api', {}, { GEMINI_API_KEY: ', ,' });
+        expect(settings.apiKey).toBeUndefined();
+        const view = renderEffectiveConfig({}, { GEMINI_API_KEY: ', ,' });
+        expect(JSON.parse(view).providers?.['gemini-api']).toBeUndefined();
+    });
+});
+
+describe('GEMINI_BASE_URL', () => {
+    it('is read when the file does not name gemini-api', () => {
+        const settings = resolveProviderSettings(
+            'gemini-api',
+            {},
+            { GEMINI_API_KEY: 'env-key-aaaa', GEMINI_BASE_URL: 'https://gemini-gw.example/v1' },
+        );
+        expect(settings.apiKey).toBe('env-key-aaaa');
+        expect(settings.baseUrl).toBe('https://gemini-gw.example/v1');
+    });
+
+    it('ignores ambient GEMINI_BASE_URL when the file names gemini-api without a baseUrl', () => {
+        const settings = resolveProviderSettings(
+            'gemini-api',
+            { providers: { 'gemini-api': { apiKey: 'k' } } },
+            { GEMINI_BASE_URL: 'https://gemini-gw.example/v1' },
+        );
+        expect(settings.apiKey).toBe('k');
+        expect(settings.baseUrl).toBeUndefined();
+        expect(() =>
+            assertNoRetiredEndpointBinding(
+                'gemini-api',
+                { apiKey: 'k' },
+                { GEMINI_BASE_URL: 'https://gemini-gw.example/v1' },
+            ),
+        ).not.toThrow();
+    });
+});
+
+describe('cooldown config', () => {
+    it('round-trips on and off, and rejects anything else', () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-cd-'));
+        const file = path.join(dir, 'config.json');
+        setConfigValue('cooldown', 'off', file);
+        expect(loadConfigFile(file).cooldown).toBe('off');
+        setConfigValue('cooldown', 'on', file);
+        expect(loadConfigFile(file).cooldown).toBe('on');
+        expect(() => setConfigValue('cooldown', 'maybe', file)).toThrow(/on or off/);
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('shows on (default) when absent, and the file value otherwise', () => {
+        const absent = JSON.parse(renderEffectiveConfig({}, {})) as { cooldown?: string };
+        expect(absent.cooldown).toBe('on (default)');
+        const off = JSON.parse(renderEffectiveConfig({ cooldown: 'off' }, {})) as {
+            cooldown?: string;
+        };
+        expect(off.cooldown).toBe('off (file)');
+    });
+
+    it('fails assertReadableConfig when cooldown is not a string', () => {
+        expect(() => assertReadableConfig({ cooldown: true } as never, '/tmp/c.json')).toThrow(
+            /"cooldown"/,
+        );
     });
 });

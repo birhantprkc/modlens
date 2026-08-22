@@ -2,7 +2,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { describe, expect, it } from 'vitest';
+import { emptyCooldownState, recordQuotaCooldown } from './cooldown.ts';
 import { buildDoctorReport, renderDoctorReport } from './doctor.ts';
+import { ApiKeyFailureError } from './util/apiKeys.ts';
 
 // A PATH pointing at a directory holding a fake executable, so binary detection
 // is deterministic instead of depending on what the test machine has installed.
@@ -287,5 +289,137 @@ describe('buildDoctorReport: reuse', () => {
         expect(rendered).toContain('claude granted');
         expect(rendered).toContain('codex: cli not found');
         fs.rmSync(home, { recursive: true, force: true });
+    });
+});
+
+describe('buildDoctorReport: API key counts', () => {
+    it('reports two keys from the file', () => {
+        const report = buildDoctorReport({
+            config: { providers: { 'gemini-api': { apiKey: 'file-one,file-two' } } },
+            env: {},
+        });
+        const gemini = providerNamed(report, 'gemini-api');
+        expect(gemini.ready).toBe(true);
+        expect(gemini.settings?.[0]).toMatchObject({
+            field: 'apiKey',
+            source: 'file',
+            keyCount: 2,
+        });
+        expect(gemini.detail).toBe('apiKey: file (2 keys)');
+    });
+
+    it('reports two keys from the environment', () => {
+        const report = buildDoctorReport({
+            config: {},
+            env: { GEMINI_API_KEY: 'env-one,env-two' },
+        });
+        const gemini = providerNamed(report, 'gemini-api');
+        expect(gemini.settings?.[0]).toMatchObject({
+            field: 'apiKey',
+            source: 'env',
+            keyCount: 2,
+        });
+        expect(gemini.detail).toBe('apiKey: env (2 keys)');
+    });
+
+    it('uses singular wording for one key', () => {
+        const report = buildDoctorReport({
+            config: { providers: { 'gemini-api': { apiKey: 'only-one' } } },
+            env: {},
+        });
+        expect(providerNamed(report, 'gemini-api').detail).toBe('apiKey: file (1 key)');
+    });
+});
+
+describe('buildDoctorReport: cooldown', () => {
+    const now = new Date('2026-08-06T00:00:00.000Z');
+
+    it('says the switch is off and state is not consulted', () => {
+        const report = buildDoctorReport({
+            config: { cooldown: 'off' },
+            env: {},
+            now,
+        });
+        expect(report.cooldown.enabled).toBe(false);
+        expect(report.cooldown.providers).toEqual([]);
+        expect(renderDoctorReport(report)).toContain('switch: off (state not consulted)');
+    });
+
+    it('redacts a persisted cooldown reason against known API keys', () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-doc-leak-'));
+        const statePath = path.join(dir, 'state.json');
+        fs.writeFileSync(
+            statePath,
+            `${JSON.stringify({
+                engineCooldowns: {
+                    'gemini-api::key:1': {
+                        until: new Date(now.getTime() + 45 * 60 * 1000).toISOString(),
+                        reason: 'Gemini API error 401: rejected second-key-bbbb as invalid',
+                        observedAt: now.toISOString(),
+                    },
+                },
+            })}\n`,
+        );
+        try {
+            const report = buildDoctorReport({
+                config: {
+                    providers: {
+                        'gemini-api': { apiKey: 'first-key-aaaa,second-key-bbbb' },
+                    },
+                },
+                env: {},
+                statePath,
+                now,
+            });
+            const reason = report.cooldown.providers[0]?.reason ?? '';
+            expect(reason).not.toContain('second-key-bbbb');
+            expect(reason).not.toContain('first-key-aaaa');
+            const rendered = renderDoctorReport(report);
+            expect(rendered).not.toContain('second-key-bbbb');
+            expect(JSON.stringify(report.cooldown)).not.toContain('second-key-bbbb');
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('reports remaining time for a cooling key', () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-doc-cd-'));
+        const statePath = path.join(dir, 'state.json');
+        recordQuotaCooldown(
+            emptyCooldownState(),
+            'gemini-api',
+            new ApiKeyFailureError('out of credits', { quotaCooldown: 'default' }),
+            now,
+            statePath,
+            undefined,
+            1,
+        );
+        try {
+            const report = buildDoctorReport({
+                config: {},
+                env: {},
+                statePath,
+                now,
+            });
+            expect(report.cooldown.enabled).toBe(true);
+            expect(report.cooldown.providers).toMatchObject([
+                { provider: 'gemini-api', keyIndex: 1, remaining: '45m' },
+            ]);
+            const rendered = renderDoctorReport(report);
+            expect(rendered).toContain('switch: on');
+            expect(rendered).toMatch(/gemini-api key 2\s+cooling, 45m left/);
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('says no providers are cooling when the switch is on and the store is empty', () => {
+        const report = buildDoctorReport({
+            config: {},
+            env: {},
+            statePath: path.join(os.tmpdir(), 'modlens-doc-missing', 'state.json'),
+            now,
+        });
+        expect(renderDoctorReport(report)).toContain('no providers are cooling right now');
     });
 });

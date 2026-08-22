@@ -10,7 +10,7 @@ read_when:
 
 English | [中文](troubleshooting.zh-CN.md)
 
-Start with `modlens doctor`: it checks your Node version, which providers are ready, which one will be selected and why, and the detected harness, all without spending quota or making a network request. It catches most setup problems before you read any further.
+Start with `modlens doctor`: it checks your Node version, which providers are ready (including how many API keys each one has), which one will be selected and why, the cooldown switch and any cooling keys, and the detected harness, all without spending quota or making a network request. It catches most setup problems before you read any further. A spent key rotates to the next one, then cools, so the next run tries a healthy key first.
 
 Every message below is one modlens actually prints. Search this file for the words you saw.
 

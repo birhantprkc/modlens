@@ -2,6 +2,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { composeChain } from '../analyzer.ts';
+import { buildCooldownController, emptyCooldownState, recordQuotaCooldown } from '../cooldown.ts';
+import { ApiKeyFailureError } from '../util/apiKeys.ts';
 import { findOnPath, providerAvailable, providerChain } from './availability.ts';
 
 const dirs: string[] = [];
@@ -98,6 +101,12 @@ describe('providerAvailable', () => {
             ),
         ).toBe(true);
         expect(providerAvailable('unknown-provider', {}, { PATH: pathWith() })).toBe(false);
+    });
+
+    it("does not treat GEMINI_API_KEY=', ,' as a key", () => {
+        expect(
+            providerAvailable('gemini-api', {}, { PATH: pathWith(), GEMINI_API_KEY: ', ,' }),
+        ).toBe(false);
     });
 });
 
@@ -250,4 +259,68 @@ describe('PATH is read the way the platform reads it (#43)', () => {
             expect(findOnPath('agy', { PATH: dir })).toBe(path.join(dir, 'agy'));
         },
     );
+});
+
+describe('composeChain cooldown reorder', () => {
+    const now = new Date('2026-08-06T00:00:00.000Z');
+    const keyed = {
+        providers: {
+            'gemini-api': { apiKey: 'g1,g2' },
+            openai: { apiKey: 'o', baseUrl: 'https://x', model: 'm' },
+            anthropic: { apiKey: 'a' },
+        },
+    };
+
+    it('moves a provider to the back only when every configured key is cooling', () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-avail-cd-'));
+        dirs.push(dir);
+        const p = path.join(dir, 'state.json');
+        recordQuotaCooldown(
+            emptyCooldownState(),
+            'gemini-api',
+            new ApiKeyFailureError('out of credits', { quotaCooldown: 'default' }),
+            now,
+            p,
+            undefined,
+            0,
+        );
+        recordQuotaCooldown(
+            emptyCooldownState(),
+            'gemini-api',
+            new ApiKeyFailureError('out of credits', { quotaCooldown: 'default' }),
+            now,
+            p,
+            undefined,
+            1,
+        );
+        const cooldown = buildCooldownController({}, { now, statePath: p });
+        const env = { PATH: pathWith() };
+        expect(names(composeChain('local', keyed, { env }, cooldown))).toEqual([
+            'openai',
+            'anthropic',
+            'gemini-api',
+        ]);
+    });
+
+    it('does not demote a provider that still has a healthy key', () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-avail-cd-'));
+        dirs.push(dir);
+        const p = path.join(dir, 'state.json');
+        recordQuotaCooldown(
+            emptyCooldownState(),
+            'gemini-api',
+            new ApiKeyFailureError('out of credits', { quotaCooldown: 'default' }),
+            now,
+            p,
+            undefined,
+            0,
+        );
+        const cooldown = buildCooldownController({}, { now, statePath: p });
+        const env = { PATH: pathWith() };
+        expect(names(composeChain('local', keyed, { env }, cooldown))).toEqual([
+            'gemini-api',
+            'openai',
+            'anthropic',
+        ]);
+    });
 });

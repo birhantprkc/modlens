@@ -1397,16 +1397,27 @@ const REUSE_HARNESSES = ['claude', 'codex', 'opencode', 'pi', 'grok']
 // one source whole, so the card has to read the same two places a read does or
 // it shows an empty form for an engine that works.
 const ENGINE_ENV_BINDINGS = {
-  'gemini-api': { apiKey: 'GEMINI_API_KEY' },
+  'gemini-api': { apiKey: 'GEMINI_API_KEY', baseUrl: 'GEMINI_BASE_URL' },
   openai: { apiKey: 'OPENAI_API_KEY', baseUrl: 'OPENAI_BASE_URL' },
   anthropic: { apiKey: 'ANTHROPIC_API_KEY', baseUrl: 'ANTHROPIC_BASE_URL' },
+}
+
+/** Whether a comma-separated API-key value contains at least one real key. */
+function hasApiKeys(value) {
+  return (
+    typeof value === 'string' &&
+    value
+      .split(',')
+      .map((key) => key.trim())
+      .some((key) => key !== '')
+  )
 }
 
 function engineEnvSettings(engine, env = process.env) {
   const settings = {}
   for (const [field, variable] of Object.entries(ENGINE_ENV_BINDINGS[engine] ?? {})) {
     const value = typeof env[variable] === 'string' ? env[variable].trim() : ''
-    if (value !== '') settings[field] = value
+    if (value !== '' && (field !== 'apiKey' || hasApiKeys(value))) settings[field] = value
   }
   return settings
 }
@@ -1472,7 +1483,7 @@ function engineSummary(config = readModlensConfig()) {
     engines[name] = {
       baseUrl: typeof settings.baseUrl === 'string' ? settings.baseUrl : '',
       model: typeof settings.model === 'string' ? settings.model : '',
-      hasKey: typeof settings.apiKey === 'string' && settings.apiKey !== '',
+      hasKey: hasApiKeys(settings.apiKey),
       // '' means neither source holds anything, which is not the same as the
       // file holding an empty entry: that one is already off its variables.
       source: inFile ? 'file' : Object.keys(settings).length > 0 ? 'env' : '',

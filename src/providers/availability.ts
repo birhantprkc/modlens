@@ -12,6 +12,7 @@ import {
     type ProviderStringField,
     resolveProviderSettings,
 } from '../config.ts';
+import { splitApiKeys } from '../util/apiKeys.ts';
 import { envValue } from '../util/winEnv.ts';
 import { resolveProvider, type VisionProvider } from './index.ts';
 
@@ -118,7 +119,11 @@ export function providerAvailable(
         return findOnPath(descriptor.bin as string, env) !== null;
     }
     const settings = resolveProviderSettings(name, config, env);
-    return (descriptor.required ?? []).every((req) => Boolean(settings[req.field]?.trim()));
+    return (descriptor.required ?? []).every((req) =>
+        req.field === 'apiKey'
+            ? splitApiKeys(settings.apiKey).length > 0
+            : Boolean(settings[req.field]?.trim()),
+    );
 }
 
 // The failover orders. Both kinds lead with the inline API providers: a

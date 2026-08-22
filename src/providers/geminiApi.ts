@@ -4,6 +4,7 @@ import { fetchRemoteImageBase64, readLocalImageBase64 } from '../imageInput.ts';
 import { apiFetch } from '../net/proxy.ts';
 import { buildVisionPrompt } from '../prompt.ts';
 import { VISION_RESULT_SCHEMA } from '../schema.ts';
+import { errorFromApiStatus, splitApiKeys } from '../util/apiKeys.ts';
 import { mergeExtraBody } from '../util/extraBody.ts';
 import { truncate } from '../util/json.ts';
 import { redactSecrets } from '../util/redact.ts';
@@ -19,7 +20,9 @@ const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com';
 export async function executeGeminiApi(
     options: BuildProviderInvocationOptions,
 ): Promise<ProviderParsedOutput> {
-    const apiKey = options.settings?.apiKey;
+    const apiKeys = splitApiKeys(options.settings?.apiKey);
+    const apiKey = apiKeys[0];
+    const apiKeySecrets = [...new Set([...apiKeys, ...(options.apiKeySecrets ?? [])])];
     if (!apiKey) {
         throw new Error(
             'gemini-api provider needs an API key. Run: modlens config set gemini-api.apiKey and paste it at the hidden prompt (free key: https://aistudio.google.com)',
@@ -85,10 +88,10 @@ export async function executeGeminiApi(
     );
 
     if (!response.ok) {
-        const body = await response.text();
-        throw new Error(
-            `Gemini API error ${response.status}: ${truncate(redactSecrets(body, [apiKey]))}`,
-        );
+        const body = (await response.text().catch(() => '')).trim();
+        const detail = redactSecrets(body, apiKeySecrets);
+        const message = `Gemini API error ${response.status}: ${truncate(detail)}`;
+        throw errorFromApiStatus(response.status, message, detail);
     }
 
     const payload = (await response.json()) as {

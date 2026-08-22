@@ -178,6 +178,8 @@ bash ~/.claude/skills/modlens/scripts/run.sh config set gemini-api.apiKey <KEY>
 bash ~/.claude/skills/modlens/scripts/run.sh config set provider gemini-api
 ```
 
+`apiKey` accepts a comma-separated list. ModLens rotates to the next key after authentication, rate-limit, or quota failures. Other failures skip remaining keys and keep provider failover.
+
 If you do not have a key, ask the user for one: a free key takes about three
 minutes at [Google AI Studio](https://aistudio.google.com), no card required.
 The key is written to `~/.modlens/config.json` with `0600` permissions, and
@@ -246,6 +248,8 @@ bash ~/.claude/skills/modlens/scripts/run.sh config set openai.model <model>
 bash ~/.claude/skills/modlens/scripts/run.sh config set provider openai
 ```
 
+`apiKey` accepts a comma-separated list. ModLens rotates to the next key after authentication, rate-limit, or quota failures. Other failures skip remaining keys and keep provider failover.
+
 All three fields are required, and the model must accept image input (a
 text-only coding model on the same platform will not work). Recipes for common
 platforms live in the skill's `references/configure.md`.
@@ -269,7 +273,7 @@ looks like this (trimmed):
 
 ```
 Providers
-  [ok] gemini-api: apiKey: file
+  [ok] gemini-api: apiKey: file (1 key)
   ...
 Selected provider
   gemini-api

@@ -23,6 +23,8 @@ export interface BuildProviderInvocationOptions {
     workdir?: string;
     timeoutMs: number;
     settings?: ProviderSettings;
+    /** Every configured key for this provider, so sibling keys can be redacted. */
+    apiKeySecrets?: readonly string[];
 }
 
 export interface ProviderParsedOutput {
@@ -52,7 +54,7 @@ export interface VisionProvider {
     parseOutput?: (stdout: string) => ProviderParsedOutput;
     execute?: (options: BuildProviderInvocationOptions) => Promise<ProviderParsedOutput>;
     /** Turn a non-zero exit into an actionable message, or null to use the default. */
-    describeFailure?: (context: ProviderFailureContext) => string | null;
+    describeFailure?: (context: ProviderFailureContext) => string | Error | null;
     /** True when the CLI enforces its own deadline, so we add a kill backstop. */
     hasInternalTimeout?: boolean;
     /**

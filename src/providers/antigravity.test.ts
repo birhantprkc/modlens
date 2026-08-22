@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { VISION_RESULT_SCHEMA } from '../schema.ts';
+import { ApiKeyFailureError } from '../util/apiKeys.ts';
 import {
     buildAntigravityInvocation,
     DEFAULT_MODEL,
@@ -178,9 +179,13 @@ describe('describeAntigravityFailure', () => {
             stderr: '',
             code: 1,
         });
-        expect(message).toContain('Resets in 94h19m9s');
-        expect(message).toContain('weekly bucket');
-        expect(message).toContain('modlens config set provider gemini-api');
+        expect(message).toBeInstanceOf(ApiKeyFailureError);
+        const error = message as ApiKeyFailureError;
+        expect(error.message).toContain('Resets in 94h19m9s');
+        expect(error.message).toContain('weekly bucket');
+        expect(error.message).toContain('modlens config set provider gemini-api');
+        expect(error.quotaCooldown).toBe('default');
+        expect(error.resetAfterMs).toBe((94 * 3600 + 19 * 60 + 9) * 1000);
     });
 
     it('falls back to a generic did-no-work message with the log path', () => {
