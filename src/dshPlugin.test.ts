@@ -20,6 +20,13 @@ const canon = (target: string): string =>
         ? fs.realpathSync.native(target)
         : fs.realpathSync(target);
 
+/** Minimal Cordis inject seam: run only when every requested service exists. */
+const injectAvailable =
+    (services: Record<string, unknown>) =>
+    (deps: string[], run: (scope: unknown) => void): void => {
+        if (deps.every((dep) => Object.hasOwn(services, dep))) run(services);
+    };
+
 /** Isolated paste directories handed to every route under test. */
 const routePasteDirs: string[] = [];
 afterAll(() => {
@@ -328,6 +335,315 @@ describe('dsh plugin vision provider (phase 3)', () => {
         plugin.apply(ctx as never, config);
         return ctx;
     }
+
+    it('waits for an active llm scope before starting discovery (#79)', async () => {
+        // @ts-expect-error untyped on purpose
+        const plugin = (await import('../dsh/index.js')) as {
+            apply: (ctx: unknown, config?: Record<string, unknown>) => void;
+        };
+        const handlers: Record<string, () => void> = {};
+        const registered: string[][] = [];
+        const armed: string[][] = [];
+        let activate: (() => void) | undefined;
+        const llm = {
+            listProviders: () => [{ id: 'deepseek-official', name: 'DeepSeek' }],
+            listModels: async () => [
+                {
+                    id: 'deepseek-v4-flash',
+                    name: 'DeepSeek V4 Flash',
+                    inputModalities: ['text'],
+                },
+            ],
+            resolveModelInfo: async (_provider: string, model: string) => ({
+                id: model,
+                inputModalities: ['text'],
+            }),
+            providerRetryPolicy: () => undefined,
+            stream: () => (async function* () {})(),
+            registerAdapter: (ids: string[], adapter: Record<string, CallableFunction>) => {
+                registered.push(ids);
+                adapter.providerInfo(ids[0]);
+                adapter.providerRetryPolicy(ids[0]);
+                const handle = () => {};
+                handle.replace = () => {};
+                return handle;
+            },
+        };
+        const activeScope = {
+            llm,
+            tools: { register: () => {} },
+            attachments: {},
+            on: (event: string, fn: () => void) => {
+                handlers[event] = fn;
+            },
+        };
+        const inactiveContext = {
+            tools: { register: () => {} },
+            attachments: {},
+            on: () => {},
+            inject: (deps: string[], fn: (scope: unknown) => void) => {
+                armed.push(deps);
+                if (deps.length === 1 && deps[0] === 'llm') {
+                    activate = () => fn(activeScope);
+                }
+            },
+            get llm(): never {
+                throw new Error('cannot get required service "llm" in inactive context');
+            },
+        };
+        const errors: string[] = [];
+        const original = console.error;
+        console.error = (value?: unknown) => errors.push(String(value));
+        try {
+            expect(() =>
+                plugin.apply(inactiveContext as never, {
+                    pasteToPath: false,
+                    settingsCard: false,
+                }),
+            ).not.toThrow();
+            expect(armed).toContainEqual(['llm']);
+            expect(registered).toEqual([]);
+
+            activate?.();
+            await vi.waitFor(() => expect(registered).toEqual([['deepseek-modlens']]));
+            expect(errors.join('\n')).not.toContain('inactive context');
+
+            handlers['llm/adapters-updated']();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            expect(registered).toEqual([['deepseek-modlens']]);
+        } finally {
+            console.error = original;
+        }
+    });
+
+    it('invalidates a deferred discovery sweep before llm replacement (#79)', async () => {
+        // @ts-expect-error untyped on purpose
+        const plugin = (await import('../dsh/index.js')) as {
+            apply: (ctx: unknown, config?: Record<string, unknown>) => void;
+        };
+        type Cleanup = () => void;
+        type Injected = (scope: unknown) => undefined | Cleanup;
+        let mountLlm: Injected | undefined;
+        let resolveOldModels: ((models: Array<{ id: string }>) => void) | undefined;
+        let oldListCalls = 0;
+        const oldModels = new Promise<Array<{ id: string }>>((resolve) => {
+            resolveOldModels = resolve;
+        });
+        const registered: string[] = [];
+        const errors: string[] = [];
+
+        const activation = (
+            provider: string,
+            models: () => Promise<Array<{ id: string }>>,
+        ): { deactivate: () => Promise<void> } => {
+            let active = true;
+            let acceptsEffects = true;
+            const effects: Cleanup[] = [];
+            const handlers: Record<string, () => void> = {};
+            const assertCanCreateEffect = () => {
+                if (acceptsEffects) return;
+                const error = new Error('cannot create effect on inactive context');
+                (error as Error & { code: string }).code = 'INACTIVE_EFFECT';
+                throw error;
+            };
+            const llm = {
+                listProviders: () => [{ id: provider, name: provider }],
+                listModels: models,
+                resolveModelInfo: async (_upstream: string, model: string) => ({
+                    id: model,
+                    inputModalities: ['text'],
+                }),
+                providerRetryPolicy: () => undefined,
+                stream: () => (async function* () {})(),
+                registerAdapter: (ids: string[]) => {
+                    assertCanCreateEffect();
+                    registered.push(...ids);
+                    const handle = () => {};
+                    handle.replace = () => {};
+                    effects.push(handle);
+                    return handle;
+                },
+            };
+            const scope = {
+                get llm() {
+                    if (!active) {
+                        throw new Error('cannot get required service "llm" in inactive context');
+                    }
+                    return llm;
+                },
+                on: (event: string, fn: () => void) => {
+                    handlers[event] = fn;
+                    const dispose = () => {
+                        delete handlers[event];
+                    };
+                    effects.push(dispose);
+                    return dispose;
+                },
+                effect: (run: () => void) => {
+                    assertCanCreateEffect();
+                    run();
+                    return () => {};
+                },
+            };
+            const cleanup = mountLlm?.(scope);
+            if (typeof cleanup === 'function') effects.push(cleanup);
+            return {
+                deactivate: async () => {
+                    // Cordis marks the fiber UNLOADING synchronously, then
+                    // crosses one microtask before running its disposers.
+                    acceptsEffects = false;
+                    await Promise.resolve();
+                    active = false;
+                    for (const dispose of effects.reverse()) dispose();
+                },
+            };
+        };
+
+        const original = console.error;
+        console.error = (value?: unknown) => errors.push(String(value));
+        try {
+            plugin.apply(
+                {
+                    tools: { register: () => {} },
+                    attachments: {},
+                    on: () => {},
+                    inject: (deps: string[], run: Injected) => {
+                        if (deps.length === 1 && deps[0] === 'llm') mountLlm = run;
+                    },
+                } as never,
+                { pasteToPath: false, settingsCard: false },
+            );
+
+            const old = activation('old-route', () => {
+                oldListCalls += 1;
+                return oldModels;
+            });
+            expect(oldListCalls).toBe(1);
+
+            // Resolve first so the sweep continuation is already queued when
+            // the same task starts unloading the child fiber.
+            resolveOldModels?.([{ id: 'deepseek-v4-flash' }]);
+            await old.deactivate();
+
+            activation('next-route', async () => [{ id: 'glm-5.3' }]);
+            await vi.waitFor(() => expect(registered).toContain('modlens-next-route'));
+
+            expect(registered).not.toContain('modlens-old-route');
+            expect(errors.join('\n')).not.toContain('inactive context');
+        } finally {
+            console.error = original;
+        }
+    });
+
+    it('does not refresh a later wrapper after a deferred probe enters unload (#79)', async () => {
+        // @ts-expect-error untyped on purpose
+        const plugin = (await import('../dsh/index.js')) as {
+            apply: (ctx: unknown, config?: Record<string, unknown>) => void;
+        };
+        type Cleanup = () => void;
+        type Injected = (scope: unknown) => undefined | Cleanup;
+        type Provider = { id: string; name: string; models: Array<{ id: string }> };
+        let mountLlm: Injected | undefined;
+        let resolveDeferred: ((models: Array<{ id: string }>) => void) | undefined;
+        let deferredCalls = 0;
+        let acceptsEffects = true;
+        let active = true;
+        let maxRetries = 2;
+        let replaceDuringUnload = 0;
+        const effects: Cleanup[] = [];
+        const handlers: Record<string, () => void> = {};
+        const registered: string[] = [];
+        const providers: Provider[] = [
+            { id: 'route-b', name: 'Route B', models: [{ id: 'glm-5.3' }] },
+        ];
+        const deferred = new Promise<Array<{ id: string }>>((resolve) => {
+            resolveDeferred = resolve;
+        });
+        const assertCanCreateEffect = () => {
+            if (acceptsEffects) return;
+            const error = new Error('cannot create effect on inactive context');
+            (error as Error & { code: string }).code = 'INACTIVE_EFFECT';
+            throw error;
+        };
+        const llm = {
+            listProviders: () => providers.map(({ id, name }) => ({ id, name })),
+            listModels: (provider: string) => {
+                if (provider === 'route-a') {
+                    deferredCalls += 1;
+                    return deferred;
+                }
+                return Promise.resolve(providers.find(({ id }) => id === provider)?.models ?? []);
+            },
+            resolveModelInfo: async (_provider: string, model: string) => ({
+                id: model,
+                inputModalities: ['text'],
+            }),
+            providerRetryPolicy: () => ({ maxRetries }),
+            stream: () => (async function* () {})(),
+            registerAdapter: (ids: string[], adapter: Record<string, CallableFunction>) => {
+                assertCanCreateEffect();
+                registered.push(...ids);
+                adapter.providerRetryPolicy(ids[0]);
+                const handle = () => {};
+                handle.replace = () => {
+                    if (!acceptsEffects) replaceDuringUnload += 1;
+                    adapter.providerRetryPolicy(ids[0]);
+                };
+                effects.push(handle);
+                return handle;
+            },
+        };
+        const scope = {
+            get llm() {
+                if (!active) {
+                    throw new Error('cannot get required service "llm" in inactive context');
+                }
+                return llm;
+            },
+            on: (event: string, fn: () => void) => {
+                handlers[event] = fn;
+                const dispose = () => {
+                    delete handlers[event];
+                };
+                effects.push(dispose);
+                return dispose;
+            },
+            effect: (run: () => void) => {
+                assertCanCreateEffect();
+                run();
+                return () => {};
+            },
+        };
+
+        plugin.apply(
+            {
+                tools: { register: () => {} },
+                attachments: {},
+                on: () => {},
+                inject: (deps: string[], run: Injected) => {
+                    if (deps.length === 1 && deps[0] === 'llm') mountLlm = run;
+                },
+            } as never,
+            { pasteToPath: false, settingsCard: false },
+        );
+        const cleanup = mountLlm?.(scope);
+        if (typeof cleanup === 'function') effects.push(cleanup);
+        await vi.waitFor(() => expect(registered).toContain('modlens-route-b'));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        providers.unshift({ id: 'route-a', name: 'Route A', models: [] });
+        handlers['llm/adapters-updated']();
+        await vi.waitFor(() => expect(deferredCalls).toBe(1));
+
+        maxRetries = 50;
+        resolveDeferred?.([]);
+        acceptsEffects = false;
+        await Promise.resolve();
+        active = false;
+        for (const dispose of effects.reverse()) dispose();
+
+        expect(replaceDuringUnload).toBe(0);
+    });
 
     it('registers a wrapper provider that declares image input and delegates', async () => {
         const registered: Array<{
@@ -1690,6 +2006,7 @@ describe('dsh paste-to-path host route', () => {
                     if (events) events[event] = fn;
                 },
                 inject: (deps: string[], fn: (scope: unknown) => void) => {
+                    if (deps.includes('llm') && llm) fn({ llm, on: () => {} });
                     // The scoped closure runs only where webServer exists.
                     if (deps.includes('webServer')) fn(scoped);
                 },
@@ -1725,6 +2042,154 @@ describe('dsh paste-to-path host route', () => {
             },
         };
     }
+
+    it('releases wrapper ownership when the injected llm scope unloads (#79)', async () => {
+        // @ts-expect-error untyped on purpose
+        const plugin = (await import('../dsh/index.js')) as {
+            apply: (ctx: unknown, config?: Record<string, unknown>) => void;
+        };
+        type Cleanup = () => void;
+        type Injected = (scope: unknown) => undefined | Cleanup;
+        type Model = { id: string; name: string; inputModalities: string[] };
+        type Provider = { id: string; name: string; models: Model[] };
+        let mountLlm: Injected | undefined;
+        let currentLlm: Record<string, unknown> | undefined;
+        const routes: Array<{ name: string; path: string; handler: RouteHandler }> = [];
+        const isolated = fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-testpaste-'));
+        routePasteDirs.push(isolated);
+
+        const webScope = {
+            webServer: {
+                register: (route: { name: string; path: string; handler: RouteHandler }) =>
+                    routes.push(route),
+            },
+        };
+        plugin.apply(
+            {
+                tools: { register: () => {} },
+                attachments: {},
+                on: () => {},
+                get llm() {
+                    if (!currentLlm) {
+                        throw new Error('cannot get required service "llm" in inactive context');
+                    }
+                    return currentLlm;
+                },
+                inject: (deps: string[], run: Injected) => {
+                    if (deps.length === 1 && deps[0] === 'llm') mountLlm = run;
+                    if (deps.length === 1 && deps[0] === 'webServer') run(webScope);
+                },
+            } as never,
+            { pasteDir: isolated, settingsCard: false },
+        );
+
+        const activate = (providers: Provider[]) => {
+            let active = true;
+            const effects: Cleanup[] = [];
+            const handlers: Record<string, () => void> = {};
+            const registered: string[] = [];
+            const llm = {
+                listProviders: () => providers.map(({ id, name }) => ({ id, name })),
+                listModels: async (provider: string) =>
+                    providers.find(({ id }) => id === provider)?.models ?? [],
+                resolveModelInfo: async (_provider: string, model: string) => ({
+                    id: model,
+                    inputModalities: ['text'],
+                }),
+                providerRetryPolicy: () => undefined,
+                stream: () => (async function* () {})(),
+                registerAdapter: (ids: string[]) => {
+                    registered.push(...ids);
+                    const handle = () => {};
+                    handle.replace = () => {};
+                    effects.push(handle);
+                    return handle;
+                },
+            };
+            currentLlm = llm;
+            const scope = {
+                get llm() {
+                    if (!active) {
+                        throw new Error('cannot get required service "llm" in inactive context');
+                    }
+                    return llm;
+                },
+                on: (event: string, fn: () => void) => {
+                    handlers[event] = fn;
+                    const dispose = () => {
+                        delete handlers[event];
+                    };
+                    effects.push(dispose);
+                    return dispose;
+                },
+            };
+            const cleanup = mountLlm?.(scope);
+            if (typeof cleanup === 'function') effects.push(cleanup);
+            return {
+                registered,
+                deactivate: () => {
+                    active = false;
+                    for (const dispose of effects.reverse()) dispose();
+                    currentLlm = undefined;
+                },
+            };
+        };
+
+        const first = activate([
+            {
+                id: 'deepseek-official',
+                name: 'DeepSeek',
+                models: [
+                    {
+                        id: 'deepseek-v4-flash',
+                        name: 'DeepSeek V4 Flash',
+                        inputModalities: ['text'],
+                    },
+                ],
+            },
+        ]);
+        await vi.waitFor(() => expect(first.registered).toContain('deepseek-modlens'));
+        first.deactivate();
+
+        activate([
+            {
+                id: 'deepseek-modlens',
+                name: 'A native provider using the released id',
+                models: [
+                    {
+                        id: 'deepseek-v4-flash',
+                        name: 'DeepSeek V4 Flash',
+                        inputModalities: ['text', 'image'],
+                    },
+                ],
+            },
+            {
+                id: 'text-route',
+                name: 'Text route',
+                models: [
+                    {
+                        id: 'deepseek-v4-flash',
+                        name: 'DeepSeek V4 Flash',
+                        inputModalities: ['text'],
+                    },
+                ],
+            },
+        ]);
+
+        const paste = routes.find(({ name }) => name === 'modlens-paste');
+        expect(paste).toBeDefined();
+        const { out, res } = fakeRes();
+        await paste?.handler(
+            fakeReq(
+                'GET',
+                Buffer.alloc(0),
+                `/modlens/paste?model=${encodeURIComponent('current DeepSeek V4 Flash')}`,
+            ) as never,
+            res as never,
+        );
+        expect(out.code).toBe(200);
+        expect((JSON.parse(out.body) as { takeover: boolean }).takeover).toBe(false);
+    });
 
     it('registers /modlens/paste under the web profile and writes a private file', async () => {
         const routes = await routeOf();
@@ -2596,16 +3061,16 @@ describe('paste takeover verdict (#36)', () => {
                 agents: {},
                 attachments: {},
                 on: () => {},
-                inject: (_deps: string[], run: (scope: unknown) => void) =>
-                    run({
-                        webServer: {
-                            // Two routes register now; this suite drives the
-                            // paste one.
-                            register: (route: { name: string; handler: Handler }) => {
-                                if (route.name === 'modlens-paste') handler = route.handler;
-                            },
+                inject: injectAvailable({
+                    llm,
+                    on: () => {},
+                    webServer: {
+                        // Two routes register now; this suite drives the paste one.
+                        register: (route: { name: string; handler: Handler }) => {
+                            if (route.name === 'modlens-paste') handler = route.handler;
                         },
-                    }),
+                    },
+                }),
             } as never,
         };
     };
@@ -2729,9 +3194,11 @@ describe('paste takeover verdict, second instance (#36)', () => {
                 agents: {},
                 attachments: {},
                 on: () => {},
-                inject: (_deps: string[], run: (scope: unknown) => void) =>
-                    withRoute
-                        ? run({
+                inject: injectAvailable({
+                    llm,
+                    on: () => {},
+                    ...(withRoute
+                        ? {
                               webServer: {
                                   register: (route: {
                                       name: string;
@@ -2741,8 +3208,9 @@ describe('paste takeover verdict, second instance (#36)', () => {
                                           captured.handler = route.handler;
                                   },
                               },
-                          })
-                        : undefined,
+                          }
+                        : {}),
+                }),
             }) as never;
 
         // First instance registers the wrapper but no route.
@@ -2811,18 +3279,18 @@ describe('paste takeover verdict, ownership proof (#36)', () => {
                 agents: {},
                 attachments: {},
                 on: () => {},
-                inject: (_deps: string[], run: (scope: unknown) => void) =>
-                    run({
-                        webServer: {
-                            register: (route: {
-                                name: string;
-                                handler: (req: unknown, res: unknown) => Promise<void>;
-                            }) => {
-                                if (route.name === 'modlens-paste')
-                                    captured.handler = route.handler;
-                            },
+                inject: injectAvailable({
+                    llm,
+                    on: () => {},
+                    webServer: {
+                        register: (route: {
+                            name: string;
+                            handler: (req: unknown, res: unknown) => Promise<void>;
+                        }) => {
+                            if (route.name === 'modlens-paste') captured.handler = route.handler;
                         },
-                    }),
+                    },
+                }),
             } as never,
         };
     };
@@ -2955,9 +3423,11 @@ describe('paste takeover verdict, auto-discovered wrapper id (#36)', () => {
                 agents: {},
                 attachments: {},
                 on: () => {},
-                inject: (_deps: string[], run: (scope: unknown) => void) =>
-                    withRoute
-                        ? run({
+                inject: injectAvailable({
+                    llm,
+                    on: () => {},
+                    ...(withRoute
+                        ? {
                               webServer: {
                                   register: (route: {
                                       name: string;
@@ -2967,8 +3437,9 @@ describe('paste takeover verdict, auto-discovered wrapper id (#36)', () => {
                                           captured.handler = route.handler;
                                   },
                               },
-                          })
-                        : undefined,
+                          }
+                        : {}),
+                }),
             }) as never;
 
         plugin.apply(ctx(false), { pasteToPath: false });
@@ -3003,26 +3474,28 @@ describe('settings card route (#39)', () => {
 
     const house = () => {
         const routes: Record<string, Handler> = {};
+        const llm = {
+            listProviders: () => [],
+            listModels: async () => [],
+            resolveModelInfo: async () => ({}),
+            stream: () => (async function* () {})(),
+            registerAdapter: () => {},
+        };
         const ctx = {
-            llm: {
-                listProviders: () => [],
-                listModels: async () => [],
-                resolveModelInfo: async () => ({}),
-                stream: () => (async function* () {})(),
-                registerAdapter: () => {},
-            },
+            llm,
             tools: { register: () => {} },
             agents: {},
             attachments: {},
             on: () => {},
-            inject: (_deps: string[], run: (scope: unknown) => void) =>
-                run({
-                    webServer: {
-                        register: (route: { name: string; handler: Handler }) => {
-                            routes[route.name] = route.handler;
-                        },
+            inject: injectAvailable({
+                llm,
+                on: () => {},
+                webServer: {
+                    register: (route: { name: string; handler: Handler }) => {
+                        routes[route.name] = route.handler;
                     },
-                }),
+                },
+            }),
         } as never;
         return { routes, ctx };
     };

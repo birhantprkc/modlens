@@ -55,7 +55,20 @@ export function apply(ctx, config = {}) {
   // wrappers land, including the later sweeps, and read by the verdict.
   const ownProviders = new Set()
   if (config.visionProvider !== false) {
-    registerVisionProvider(ctx, config, ownProviders, evidenceCache)
+    // Bundle loaders can call apply while this outer context is still waiting
+    // for its required services. Reading ctx.llm here then throws "inactive
+    // context" before the first discovery sweep can register any lifecycle
+    // work (#79). Put the whole provider registry inside an injected child
+    // scope: Cordis starts it only while llm is active, and tears its listeners
+    // and registrations down with that service. Preview hosts without inject
+    // keep the dependency-free plugin's former feature-detected path.
+    if (typeof ctx.inject === 'function') {
+      ctx.inject(['llm'], (scope) => {
+        return registerVisionProvider(scope, config, ownProviders, evidenceCache)
+      })
+    } else {
+      registerVisionProvider(ctx, config, ownProviders, evidenceCache)
+    }
   }
   // Paste-to-path: the browser half (dsh/client.js) intercepts image pastes
   // and POSTs the bytes here; the file lands in a private temp dir and the
@@ -569,8 +582,48 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
     if (Array.isArray(info?.inputModalities) && info.inputModalities.includes('image')) return false
     return true
   }
-  if (typeof ctx.llm?.registerAdapter !== 'function' || typeof ctx.llm?.stream !== 'function') {
+  // Keep this activation bound to the exact service implementation that made
+  // it runnable. Cordis reuses the child context when llm is replaced, so
+  // looking the service up again after an await could otherwise move an old
+  // topology result into the new registry.
+  const llm = ctx.llm
+  if (typeof llm?.registerAdapter !== 'function' || typeof llm?.stream !== 'function') {
     return
+  }
+
+  // Discovery promises are ordinary JavaScript work, not Cordis effects.
+  // The disposer invalidates this activation before the injected child is
+  // re-run, and clears the ownership facts whose actual adapter effects the
+  // framework tears down independently.
+  let active = true
+  const claimedProviders = new Set()
+  const deactivate = () => {
+    active = false
+    for (const providerId of claimedProviders) ownProviders?.delete(providerId)
+    claimedProviders.clear()
+  }
+  // Cordis marks a fiber UNLOADING before it runs activation disposers. A
+  // promise continuation already in the microtask queue can therefore see
+  // `active` before the disposer flips it. Creating and immediately releasing
+  // a zero-work effect is the framework's atomic liveness boundary: once it
+  // succeeds, the following synchronous registry mutation cannot race an
+  // unload. A lifecycle refusal cancels this activation without turning an
+  // expected teardown into a terminal diagnostic.
+  const activationCanCommit = () => {
+    if (!active) return false
+    if (typeof ctx.effect !== 'function') return true
+    try {
+      const release = ctx.effect(() => {})
+      if (typeof release === 'function') release()
+      return active
+    } catch (error) {
+      const inactive =
+        error?.code === 'INACTIVE_EFFECT' ||
+        /cannot create effect on inactive context/i.test(String(error?.message ?? error))
+      if (!inactive) throw error
+      deactivate()
+      return false
+    }
   }
 
   // dsh snapshots providerInfo and providerRetryPolicy at registration time.
@@ -582,6 +635,7 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
   const policyKey = (policy) => (policy === undefined ? undefined : JSON.stringify(policy))
 
   const registerWrapper = (upstream, providerId, displayName) => {
+    if (!activationCanCommit()) return false
     const state = { displayName, retryPolicyKey: undefined }
     const withVision = (info) => {
       const inputModalities = Array.isArray(info?.inputModalities) ? [...info.inputModalities] : []
@@ -590,7 +644,7 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
       return { ...info, provider: providerId, inputModalities }
     }
     try {
-      const registration = ctx.llm.registerAdapter([providerId], {
+      const registration = llm.registerAdapter([providerId], {
         // Duck-typing LlmAdapter: providerInfo/providerRetryPolicy are
         // base-class defaults a plain object must supply itself (their
         // absence is exactly the silent registration failure this catch
@@ -608,20 +662,20 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
           // and the registration boundary below fails closed instead; the
           // ordinary not-mounted-yet case never reaches this method, because
           // reconcile waits for the upstream before registering (#66).
-          if (typeof ctx.llm.providerRetryPolicy !== 'function') return undefined
-          const policy = ctx.llm.providerRetryPolicy(upstream)
+          if (typeof llm.providerRetryPolicy !== 'function') return undefined
+          const policy = llm.providerRetryPolicy(upstream)
           state.retryPolicyKey = policyKey(policy)
           return policy
         },
         async listModels(_provider, signal) {
-          const models = await ctx.llm.listModels(upstream, signal)
+          const models = await llm.listModels(upstream, signal)
           return models.filter(shouldWrap).map((model) => ({
             ...withVision(model),
             name: `${model.name ?? model.id} (modlens vision)`,
           }))
         },
         async resolveModel(_provider, model, signal) {
-          const info = await ctx.llm.resolveModelInfo(upstream, model, signal)
+          const info = await llm.resolveModelInfo(upstream, model, signal)
           if (!shouldWrap(info)) {
             // Refusing is right: wrapping a model that reads images itself
             // would claim a bridge it does not need, hand it text evidence
@@ -662,7 +716,7 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
           return (async function* () {
             const converted = await convertImagesToEvidence(ctx, options.messages, options.signal, self)
             const messages = restoreUpstreamSource(converted, providerId, upstream)
-            yield* ctx.llm.stream({ ...options, provider: upstream, messages })
+            yield* llm.stream({ ...options, provider: upstream, messages })
           })()
         },
         evidenceCache,
@@ -672,6 +726,7 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
       // duplicate below means someone else holds that id, and skipping a
       // provider we do not own would let a real vision model's paste be
       // taken over, which is the bug the verdict exists to prevent.
+      claimedProviders.add(providerId)
       ownProviders?.add(providerId)
       return true
     } catch (error) {
@@ -695,6 +750,7 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
   const dropWrapper = (upstream, current) => {
     registrations.delete(upstream)
     wrapped.delete(upstream)
+    claimedProviders.delete(current.providerId)
     ownProviders?.delete(current.providerId)
     if (typeof current.registration === 'function') current.registration()
   }
@@ -704,9 +760,9 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
   // failed and what to do next depends on whether it failed before or after
   // the host committed.
   const routed = (providerId) => {
-    if (typeof ctx.llm.listProviders !== 'function') return false
+    if (typeof llm.listProviders !== 'function') return false
     try {
-      return ctx.llm.listProviders().some((info) => (typeof info === 'string' ? info : info?.id) === providerId)
+      return llm.listProviders().some((info) => (typeof info === 'string' ? info : info?.id) === providerId)
     } catch {
       return false
     }
@@ -724,7 +780,7 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
     let nextPolicyKey
     try {
       nextPolicyKey =
-        typeof ctx.llm.providerRetryPolicy === 'function' ? policyKey(ctx.llm.providerRetryPolicy(upstream)) : undefined
+        typeof llm.providerRetryPolicy === 'function' ? policyKey(llm.providerRetryPolicy(upstream)) : undefined
     } catch (error) {
       dropWrapper(upstream, current)
       console.error(`[modlens] vision provider refresh removed (${current.providerId}): ${error}`)
@@ -772,9 +828,9 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
     // plumbing below could never correct it, because the name it compared
     // against was a constant.
     const upstreamName = () => {
-      if (typeof ctx.llm.listProviders !== 'function') return upstream
+      if (typeof llm.listProviders !== 'function') return upstream
       try {
-        const found = ctx.llm.listProviders().find((entry) => entry.id === upstream)
+        const found = llm.listProviders().find((entry) => entry.id === upstream)
         return found?.name ?? upstream
       } catch {
         return upstream
@@ -789,6 +845,7 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
     // re-examined when the holder's route disappears.
     let claimedElsewhere = false
     const reconcile = () => {
+      if (!activationCanCommit()) return
       if (reconciling) {
         // dropWrapper's disposer makes the host emit adapters-updated while
         // this very run is on the stack, and whatever that event announced
@@ -800,8 +857,8 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
       try {
         const current = registrations.get(upstream)
         const available =
-          typeof ctx.llm.listProviders !== 'function' ||
-          ctx.llm.listProviders().some((info) => (typeof info === 'string' ? info : info?.id) === upstream)
+          typeof llm.listProviders !== 'function' ||
+          llm.listProviders().some((info) => (typeof info === 'string' ? info : info?.id) === upstream)
         if (!current) {
           if (claimedElsewhere) {
             if (routed(providerId)) return
@@ -848,7 +905,7 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
     }
     reconcile()
     if (typeof ctx.on === 'function') ctx.on('llm/adapters-updated', reconcile)
-    return
+    return deactivate
   }
 
   // Auto-discovery. `wrapped` guards duplicates across sweeps and the
@@ -860,16 +917,19 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
   // one promise chain so two can never interleave their probes at all.
   const discover = Array.isArray(config.discover) ? new Set(config.discover) : null
   const sweepOnce = async () => {
+    if (!activationCanCommit()) return
     try {
       await sweepBody()
     } catch (error) {
+      if (!active) return
       // A sweep failure must never become an unhandled rejection inside the
       // host process; the next topology notification simply tries again.
       console.error(`[modlens] vision provider discovery sweep failed: ${error}`)
     }
   }
   const sweepBody = async () => {
-    if (typeof ctx.llm.listProviders !== 'function') {
+    if (!active) return
+    if (typeof llm.listProviders !== 'function') {
       // Older registry surface: fall back to the single legacy wrap once.
       if (!wrapped.has('__legacy_fallback__')) {
         wrapped.add('__legacy_fallback__')
@@ -877,15 +937,18 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
       }
       return
     }
-    const providers = ctx.llm.listProviders()
+    const providers = llm.listProviders()
+    if (!active) return
     // Same tolerance as the pinned path: an entry may be a bare id string.
     const idOf = (info) => (typeof info === 'string' ? info : info?.id)
     const available = new Set(providers.map(idOf).filter(Boolean))
     for (const [upstream, current] of registrations) {
+      if (!active) return
       if (available.has(upstream)) continue
       dropWrapper(upstream, current)
     }
     for (const info of providers) {
+      if (!active) return
       const id = idOf(info)
       if (!id || String(id).startsWith('modlens-')) continue
       if (discover && !discover.has(id)) continue
@@ -900,13 +963,19 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
       wrapped.add(id)
       let models = []
       try {
-        models = await ctx.llm.listModels(id)
+        models = await llm.listModels(id)
       } catch {
+        if (!activationCanCommit()) return
         // Unreachable route today; release the claim so a later topology
         // change retries it.
         wrapped.delete(id)
         continue
       }
+      // The promise can settle just before Cordis marks this fiber UNLOADING,
+      // while the activation disposer is still one microtask away. Re-enter
+      // the atomic lifecycle boundary before either continuing to refresh a
+      // later registration or committing this provider's wrapper.
+      if (!activationCanCommit()) return
       if (!models.some(shouldWrap)) {
         // No eligible models yet: release, the route may gain some later.
         wrapped.delete(id)
@@ -931,6 +1000,7 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
       void sweep()
     })
   }
+  return deactivate
 }
 
 // The same pasted attachment rides every later step of its session, and the
