@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.24.1 - 2026-08-24
+
+- **dsh bundle startup no longer logs `inactive context` before `llm` is ready ([#79](https://github.com/liustack/modlens/issues/79)).** Bundle loaders can invoke the plugin while required services are still inactive. The first auto-discovery sweep read `ctx.llm` immediately, logged one to three errors, then relied on later topology events to recover. Discovery now runs inside Cordis's injected `llm` lifecycle. Each activation binds its own service, invalidates pending probes before teardown, and releases its wrapper ownership. A Cordis effect boundary also stops Promise continuations that were already queued from registering or refreshing adapters after the scope starts unloading. Existing and late providers are still discovered exactly once, and preview hosts without injection retain their previous feature-detected path.
+
 ## 3.24.0 - 2026-08-22
 
 - A single `gemini-api`, `openai`, or `anthropic` provider can now use multiple API keys. Both `providers.<name>.apiKey` and the corresponding environment variable accept a comma-separated list, trim each item, and ignore empty entries. Requests use the configured order and rotate only after authentication, rate-limit, or quota failures. Network, 5xx, and response-parsing failures skip the remaining keys and preserve the existing cross-provider failover. Quota cooldown is recorded per key, and a provider moves to the back only when every configured key is cooling. Legacy provider-level cooldown state still loads. Every sibling key is registered for redaction, `doctor` reports the key count, and the dsh settings card explains the syntax. Single-key and keyless attempts keep their previous JSON shape, while multi-key attempts add a zero-based `keyIndex`.
