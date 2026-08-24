@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.24.2 - 2026-08-24
+
+- **dsh: repeated `modlens_read_image` calls reuse one image read ([#81](https://github.com/liustack/modlens/issues/81)).** A small host model can emit the same path-tool call repeatedly inside its thinking loop, and every call started a new CLI process because #68 cached attachment conversion but not the explicit tool. The tool now keeps a per-plugin LRU cache keyed by the CLI-normalized source identity and focus prompt. Identical concurrent calls join the same pending read. A changed local file or focus creates a fresh read, remote results expire after 60 seconds, and failures cool for 60 seconds before retrying. Returned evidence is cloned so one consumer cannot mutate the shared result, and the model-facing description explicitly says to call once and reuse the evidence. This prevents repeated tool decisions from becoming repeated vision-provider work. It cannot make a small model stop hallucinating calls or recover reliably from every tool failure, so duplicate call events may remain visible and hosts should still cap tool rounds where available.
+
 ## 3.24.1 - 2026-08-24
 
 - **dsh bundle startup no longer logs `inactive context` before `llm` is ready ([#79](https://github.com/liustack/modlens/issues/79)).** Bundle loaders can invoke the plugin while required services are still inactive. The first auto-discovery sweep read `ctx.llm` immediately, logged one to three errors, then relied on later topology events to recover. Discovery now runs inside Cordis's injected `llm` lifecycle. Each activation binds its own service, invalidates pending probes before teardown, and releases its wrapper ownership. A Cordis effect boundary also stops Promise continuations that were already queued from registering or refreshing adapters after the scope starts unloading. Existing and late providers are still discovered exactly once, and preview hosts without injection retain their previous feature-detected path.

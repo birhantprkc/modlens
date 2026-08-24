@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import * as http from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import * as fs from 'fs';
@@ -1901,6 +1902,182 @@ describe('dsh plugin tool name (#21, #34)', () => {
         const registered: string[] = [];
         (await load()).apply(ctxWith(registered), { toolName: 'house_read_image' });
         expect(registered).toEqual(['house_read_image']);
+    });
+
+    it('tells the model to reuse evidence instead of calling the tool again (#81)', async () => {
+        let description = '';
+        (await load()).apply(
+            {
+                tools: {
+                    register: (tool: { description: string }) => {
+                        description = tool.description;
+                    },
+                },
+                attachments: {},
+                on: () => {},
+            } as never,
+            { visionProvider: false },
+        );
+        expect(description).toContain('call this tool once');
+        expect(description).toContain('reuse its returned evidence');
+    });
+
+    it('reuses one read when a thinking loop repeats the same tool call (#81)', async () => {
+        type Tool = {
+            execute: (
+                args: { path: string; prompt?: string },
+                exec: { signal?: AbortSignal },
+            ) => Promise<{ summary: string }>;
+        };
+        let tool: Tool | undefined;
+        (await load()).apply(
+            {
+                tools: {
+                    register: (value: Tool) => {
+                        tool = value;
+                    },
+                },
+                attachments: {},
+                on: () => {},
+            } as never,
+            { visionProvider: false },
+        );
+        expect(tool).toBeDefined();
+        if (!tool) throw new Error('tool was not registered');
+        const activeTool = tool;
+
+        let requests = 0;
+        let failMode = false;
+        const server = http.createServer(async (req, res) => {
+            requests += 1;
+            for await (const _chunk of req) {
+                // Drain the request before answering, like a real gateway.
+            }
+            if (failMode) {
+                res.writeHead(500, { 'content-type': 'text/plain' });
+                res.end(`temporary failure ${requests}`);
+                return;
+            }
+            const result = {
+                summary: 'one read',
+                ocr: { full_text: '', lines: [] },
+                layout: { regions: [] },
+                semantics: { scene: '', intent: '', entities: [], relations: [] },
+                visual: { dominant_colors: [], style: '', notes: [] },
+                uncertainty: [],
+            };
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end(
+                JSON.stringify({
+                    choices: [{ message: { content: JSON.stringify(result) } }],
+                }),
+            );
+        });
+        await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+        const address = server.address();
+        if (!address || typeof address === 'string') throw new Error('test server has no port');
+
+        const home = fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-dsh-tool-home-'));
+        const image = path.join(home, 'same.png');
+        fs.writeFileSync(image, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+        fs.mkdirSync(path.join(home, '.modlens'));
+        fs.writeFileSync(
+            path.join(home, '.modlens', 'config.json'),
+            JSON.stringify({
+                provider: 'openai',
+                providers: {
+                    openai: {
+                        apiKey: 'test-key',
+                        baseUrl: `http://127.0.0.1:${address.port}/v1`,
+                        model: 'local-vision',
+                    },
+                },
+            }),
+        );
+        const savedHome = {
+            HOME: process.env.HOME,
+            USERPROFILE: process.env.USERPROFILE,
+            PATH: process.env.PATH,
+        };
+        process.env.HOME = home;
+        process.env.USERPROFILE = home;
+        // Keep a failing OpenAI attempt from falling through to any real CLI
+        // provider installed on the developer's machine.
+        process.env.PATH = home;
+        try {
+            const args = { path: image, prompt: 'describe img' };
+            const first = await activeTool.execute(args, { signal: undefined });
+            first.summary = 'caller mutation';
+            const second = await activeTool.execute(args, { signal: undefined });
+            expect(requests).toBe(1);
+            expect(second.summary).toBe('one read');
+
+            // The CLI trims the source before resolving it. The cache uses
+            // that same identity so cosmetic model whitespace cannot miss.
+            await activeTool.execute(
+                { path: ` ${image} `, prompt: 'describe img' },
+                { signal: undefined },
+            );
+            expect(requests).toBe(1);
+
+            // A path is not an image identity. Replacing its bytes must make
+            // the next call a new read instead of serving stale evidence.
+            fs.writeFileSync(
+                image,
+                Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01]),
+            );
+            await activeTool.execute(args, { signal: undefined });
+            expect(requests).toBe(2);
+
+            // A different focus is a different read contract even when the
+            // source bytes are unchanged.
+            await activeTool.execute(
+                { path: image, prompt: 'focus on the lower-right labels' },
+                { signal: undefined },
+            );
+            expect(requests).toBe(3);
+
+            // The tool advertises concurrency safety. Two identical calls
+            // that overlap must join the same in-flight read.
+            const concurrent = { path: image, prompt: 'concurrent focus' };
+            await Promise.all([
+                activeTool.execute(concurrent, { signal: undefined }),
+                activeTool.execute(concurrent, { signal: undefined }),
+            ]);
+            expect(requests).toBe(4);
+
+            // A broken engine must not turn a model's immediate retry loop
+            // into another paid request on every tool call. The cooldown is
+            // finite so recovery is picked up without restarting the plugin.
+            vi.useFakeTimers({ toFake: ['performance'] });
+            failMode = true;
+            const failing = { path: image, prompt: 'failing focus' };
+            const firstError = await activeTool
+                .execute(failing, { signal: undefined })
+                .catch((error: Error) => error.message);
+            const secondError = await activeTool
+                .execute(failing, { signal: undefined })
+                .catch((error: Error) => error.message);
+            expect(requests).toBe(5);
+            expect(secondError).toBe(firstError);
+
+            vi.advanceTimersByTime(61_000);
+            failMode = false;
+            await activeTool.execute(failing, { signal: undefined });
+            expect(requests).toBe(6);
+        } finally {
+            vi.useRealTimers();
+            if (savedHome.HOME === undefined) delete process.env.HOME;
+            else process.env.HOME = savedHome.HOME;
+            if (savedHome.USERPROFILE === undefined) delete process.env.USERPROFILE;
+            else process.env.USERPROFILE = savedHome.USERPROFILE;
+            if (savedHome.PATH === undefined) delete process.env.PATH;
+            else process.env.PATH = savedHome.PATH;
+            fs.rmSync(home, { recursive: true, force: true });
+            await new Promise<void>((resolve, reject) =>
+                server.close((error) => (error ? reject(error) : resolve())),
+            );
+        }
     });
 
     it('a registration error degrades without killing apply', async () => {

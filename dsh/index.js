@@ -10,9 +10,9 @@
 // Loaded via the cordis.patch.yml row `@liustack/modlens/dsh` (see the
 // package.json `dsh.bundle` manifest). Providers, reuse grants, and guard
 // rules keep living in ~/.modlens/config.json, shared with every harness.
-import { chmodSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnHidden } from './spawnHidden.js'
 
@@ -22,6 +22,90 @@ const CLI_PATH = fileURLToPath(new URL('../dist/main.js', import.meta.url))
 const OUTPUT_SCHEMA = JSON.parse(readFileSync(new URL('./vision-schema.json', import.meta.url), 'utf8'))
 
 const CLI_TIMEOUT_MS = 180_000
+const TOOL_READ_CACHE_LIMIT = 256
+const TOOL_READ_FAILURE_COOLDOWN_MS = 60_000
+const TOOL_READ_REMOTE_TTL_MS = 60_000
+// Shared by both evidence caches. Monotonic time keeps an NTP adjustment from
+// extending or collapsing a retry window.
+const monotonicNow = () => performance.now()
+
+function toolReadSourceKey(rawSource) {
+  const source = rawSource.trim()
+  if (/^https?:\/\//i.test(source)) {
+    return `remote:${source}`
+  }
+  try {
+    const file = /^file:\/\//i.test(source) ? fileURLToPath(source) : resolve(source)
+    const stat = statSync(file, { bigint: true })
+    // A path is not an image identity. The inode and nanosecond timestamps
+    // make an overwrite or replacement a fresh read while unchanged bytes at
+    // the same path stay reusable during a thinking loop.
+    return `local:${file}:${stat.dev}:${stat.ino}:${stat.mode}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`
+  } catch {
+    // Let the CLI produce the canonical missing-file or invalid-path error.
+    // If the file appears later, the successful stat above changes the key.
+    return `local-unreadable:${source}`
+  }
+}
+
+function trimToolReadCache(cache) {
+  while (cache.size > TOOL_READ_CACHE_LIMIT) {
+    let victim
+    for (const [key, entry] of cache) {
+      if (entry.state !== 'pending') {
+        victim = key
+        break
+      }
+    }
+    // In-flight work stays joinable. The cap goes soft only while every
+    // candidate is pending, then settlement runs this trim again.
+    if (victim === undefined) return
+    cache.delete(victim)
+  }
+}
+
+function cachedToolRead(cache, key, remote, load) {
+  const now = monotonicNow()
+  let entry = cache.get(key)
+  if (entry && entry.expiresAt <= now) {
+    cache.delete(key)
+    entry = undefined
+  }
+  if (entry) {
+    // Map insertion order is the LRU order.
+    cache.delete(key)
+    cache.set(key, entry)
+    return entry.promise
+  }
+
+  entry = { state: 'pending', expiresAt: Number.POSITIVE_INFINITY, promise: undefined }
+  const promise = Promise.resolve()
+    .then(load)
+    .then(
+      (value) => {
+        if (cache.get(key) === entry) {
+          entry.state = 'success'
+          entry.expiresAt = remote ? monotonicNow() + TOOL_READ_REMOTE_TTL_MS : Number.POSITIVE_INFINITY
+          trimToolReadCache(cache)
+        }
+        return value
+      },
+      (error) => {
+        if (cache.get(key) === entry) {
+          // The same failure is free and stable during the cooldown. A later
+          // call probes again, so a recovered engine needs no restart.
+          entry.state = 'failure'
+          entry.expiresAt = monotonicNow() + TOOL_READ_FAILURE_COOLDOWN_MS
+          trimToolReadCache(cache)
+        }
+        throw error
+      },
+    )
+  entry.promise = promise
+  cache.set(key, entry)
+  trimToolReadCache(cache)
+  return promise
+}
 
 export const name = 'modlens'
 export const inject = ['tools', 'agents', 'attachments', 'llm']
@@ -41,6 +125,10 @@ export function apply(ctx, config = {}) {
   // whichever surface asks first (issue #68; auto-read used to bypass
   // caching entirely and re-read every image on every step).
   const evidenceCache = new Map()
+  // Explicit path-tool calls can repeat inside a small model's thinking loop.
+  // Keep their completed evidence beside the attachment cache so the model's
+  // repeated decision does not become repeated vision-provider work (#81).
+  const toolReadCache = new Map()
   // Off by default since the vision provider converts at request time and
   // keeps the durable log (and the UI thumbnail) intact; turn it on only for
   // setups where images enter through a provider this plugin does not wrap.
@@ -143,7 +231,7 @@ export function apply(ctx, config = {}) {
   const readImageTool = (toolName) => ({
     name: toolName,
     description:
-      'Read an image through the modlens vision bridge. Use whenever a message references an image the current model cannot see: a local file path or an http(s) URL to a screenshot, photo, chart, diagram, or document scan. Returns structured evidence with every word transcribed (ocr.full_text), layout regions in reading order, semantics, and an uncertainty list; quote the evidence instead of guessing. Requires a configured modlens engine (run `npx @liustack/modlens doctor` in a terminal to check).',
+      'Read an image through the modlens vision bridge. Use whenever a message references an image the current model cannot see: a local file path or an http(s) URL to a screenshot, photo, chart, diagram, or document scan. Returns structured evidence with every word transcribed (ocr.full_text), layout regions in reading order, semantics, and an uncertainty list. Quote the evidence instead of guessing. For the same image and focus, call this tool once and reuse its returned evidence instead of calling again. Requires a configured modlens engine (run `npx @liustack/modlens doctor` in a terminal to check).',
     parameters: {
       type: 'object',
       properties: {
@@ -178,23 +266,31 @@ export function apply(ctx, config = {}) {
       if (typeof args?.path !== 'string' || args.path.trim() === '') {
         throw new Error(`${toolName} needs a non-empty string "path".`)
       }
-      const cliArgs = [CLI_PATH, '-i', args.path, '--timeout', String(CLI_TIMEOUT_MS)]
-      if (args.prompt) {
-        cliArgs.push('--prompt', args.prompt)
-      }
-      const { stdout, stderr, code } = await run(process.execPath, cliArgs, exec.signal)
-      if (code !== 0) {
-        throw new Error(`modlens failed (exit ${code}): ${(stderr || stdout).trim().slice(0, 500)}`)
-      }
-      let parsed
-      try {
-        parsed = JSON.parse(stdout)
-      } catch {
-        throw new Error(`modlens produced no JSON: ${stdout.trim().slice(0, 300)}`)
-      }
-      // The canonical value is the vision result itself; routing details
-      // (meta.attempts, whose quota a reused engine spent) stay operational.
-      return parsed.result
+      const sourceKey = toolReadSourceKey(args.path)
+      const cacheKey = JSON.stringify([sourceKey, typeof args.prompt === 'string' ? args.prompt : ''])
+      const pending = cachedToolRead(toolReadCache, cacheKey, sourceKey.startsWith('remote:'), async () => {
+        const cliArgs = [CLI_PATH, '-i', args.path, '--timeout', String(CLI_TIMEOUT_MS)]
+        if (args.prompt) {
+          cliArgs.push('--prompt', args.prompt)
+        }
+        // The shared read has the CLI's own deadline but not one caller's
+        // signal. A caller may stop waiting without cancelling every other
+        // concurrent caller that joined the same image read.
+        const { stdout, stderr, code } = await run(process.execPath, cliArgs, undefined)
+        if (code !== 0) {
+          throw new Error(`modlens failed (exit ${code}): ${(stderr || stdout).trim().slice(0, 500)}`)
+        }
+        let parsed
+        try {
+          parsed = JSON.parse(stdout)
+        } catch {
+          throw new Error(`modlens produced no JSON: ${stdout.trim().slice(0, 300)}`)
+        }
+        // The canonical value is the vision result itself; routing details
+        // (meta.attempts, whose quota a reused engine spent) stay operational.
+        return parsed.result
+      })
+      return structuredClone(await abortableWait(pending, exec.signal))
     },
   })
   // A name of our own rather than the host's. dsh's registry is layered and
@@ -1017,10 +1113,6 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
 // text forever.
 const EVIDENCE_CACHE_LIMIT = 256
 const EVIDENCE_FAILURE_COOLDOWN_MS = 60_000
-// Monotonic, so an NTP step backwards cannot freeze a cooling failure for
-// the size of the jump: a recovered engine is re-probed one cooldown after
-// the failure, whatever the wall clock did in between.
-const monotonicNow = () => performance.now()
 
 /**
  * A cache key that survives replay: the same attachment serialized with a
