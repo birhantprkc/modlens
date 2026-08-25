@@ -664,7 +664,7 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
   // wrapper twin loses its native sight. Family matching also strips a vendor
   // namespace (OpenRouter's z-ai/glm-5.2:free, ~-prefixed aliases), because
   // the text-only member is the same model wherever the id carries a prefix.
-  const families = config.families || ['deepseek', 'glm']
+  const families = config.families || ['deepseek', 'glm', 'mimo']
   const VISION_ID = /(deepseek-(vl|ocr)|janus|glm-[\d.]*v(\b|-)|\bvision\b)/i
   const shouldWrap = (info) => {
     const id = String(info?.id ?? '').toLowerCase()
@@ -676,6 +676,10 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
     if (!families.some((family) => id.startsWith(family) || bare.startsWith(family))) return false
     if (VISION_ID.test(bare)) return false
     if (Array.isArray(info?.inputModalities) && info.inputModalities.includes('image')) return false
+    // MiMo needs the gate reversed. Xiaomi's bare version ids name native
+    // omni models, while a -pro segment marks text-only flagships. There is no
+    // vision marker to exclude, so only the named text subset is safe to include.
+    if (bare.startsWith('mimo') && !/(^|-)pro(?:-|:|$)/i.test(bare)) return false
     return true
   }
   // Keep this activation bound to the exact service implementation that made

@@ -2841,6 +2841,81 @@ describe('dsh vision provider auto-discovery (#29)', () => {
         expect(registered).toEqual(['modlens-opencode-go']);
     });
 
+    it('wraps MiMo text-only pro models when catalog modalities are absent', async () => {
+        // Issue #80 records Xiaomi's naming contract: a bare version is the
+        // native omni model, while a -pro segment marks a text-only flagship.
+        const { registered } = await discoveryCtx([
+            { id: 'xiaomi-pro', models: [{ id: 'mimo-v2.5-pro' }] },
+            {
+                id: 'xiaomi-ultraspeed',
+                models: [{ id: 'mimo-v2.5-pro-ultraspeed' }],
+            },
+            { id: 'xiaomi-v2-pro', models: [{ id: 'mimo-v2-pro' }] },
+        ]);
+        expect([...registered].sort()).toEqual([
+            'modlens-xiaomi-pro',
+            'modlens-xiaomi-ultraspeed',
+            'modlens-xiaomi-v2-pro',
+        ]);
+    });
+
+    it('keeps MiMo omni, speech, and image-capable models unwrapped', async () => {
+        const { registered } = await discoveryCtx([
+            { id: 'xiaomi-omni', models: [{ id: 'mimo-v2.5' }] },
+            { id: 'xiaomi-tts', models: [{ id: 'mimo-v2.5-tts' }] },
+            { id: 'xiaomi-asr', models: [{ id: 'mimo-v2.5-asr' }] },
+            {
+                id: 'xiaomi-native-pro',
+                models: [
+                    {
+                        id: 'mimo-v2.5-pro',
+                        inputModalities: ['text', 'image'],
+                    },
+                ],
+            },
+        ]);
+        expect(registered).toEqual([]);
+    });
+
+    it('applies the MiMo pro gate to namespaced ids and aliases', async () => {
+        const { registered } = await discoveryCtx([
+            {
+                id: 'xiaomi-namespaced-pro',
+                models: [{ id: 'xiaomi/mimo-v2.5-pro' }],
+            },
+            {
+                id: 'xiaomi-alias-pro',
+                models: [{ id: '~mimo-v2.5-pro' }],
+            },
+            {
+                id: 'xiaomi-qualified-pro',
+                models: [{ id: 'xiaomi/mimo-v2.5-pro:free' }],
+            },
+            {
+                id: 'xiaomi-namespaced-omni',
+                models: [{ id: 'xiaomi/mimo-v2.5' }],
+            },
+        ]);
+        expect([...registered].sort()).toEqual([
+            'modlens-xiaomi-alias-pro',
+            'modlens-xiaomi-namespaced-pro',
+            'modlens-xiaomi-qualified-pro',
+        ]);
+    });
+
+    it('keeps configured families authoritative and retains the MiMo pro gate', async () => {
+        const providers: FakeProvider[] = [
+            { id: 'custom-deepseek', models: [{ id: 'deepseek-v4-flash' }] },
+            { id: 'custom-mimo-pro', models: [{ id: 'mimo-v2.5-pro' }] },
+            { id: 'custom-mimo-omni', models: [{ id: 'mimo-v2.5' }] },
+        ];
+        const deepseekOnly = await discoveryCtx(providers, { families: ['deepseek'] });
+        expect(deepseekOnly.registered).toEqual(['modlens-custom-deepseek']);
+
+        const mimoOnly = await discoveryCtx(providers, { families: ['mimo'] });
+        expect(mimoOnly.registered).toEqual(['modlens-custom-mimo-pro']);
+    });
+
     it('never wraps a vision-named model, even when the catalog omits modalities', async () => {
         // deepseek-v4-flash-vision-exp shipped 2026-08-21. The official dsh
         // catalog declares image input, but third-party catalogs and custom
@@ -4095,6 +4170,19 @@ describe('settings card route (#39)', () => {
             expect(status).toBe(400);
             expect(String(body.error)).toContain('unknown engine');
         });
+    });
+
+    it('omits discovery from GET unless the client asked (#83)', async () => {
+        await withConfig({ provider: 'openai' }, async (handler) => {
+            const { status, body } = await call(handler, { method: 'GET', url: '/modlens/config' });
+            expect(status).toBe(200);
+            expect(body).not.toHaveProperty('discovery');
+        });
+    });
+
+    it('caches local-agent discovery for ten minutes (#83)', () => {
+        const source = fs.readFileSync(path.join(__dirname, '..', 'dsh', 'index.js'), 'utf-8');
+        expect(source).toMatch(/const DISCOVERY_TTL_MS = 600_000/);
     });
 });
 
