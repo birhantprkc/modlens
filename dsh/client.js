@@ -381,6 +381,11 @@ window.__ModuleLoader__.load({
     function ConfigCard(react, ui, localeRef) {
       var h = react.createElement
       var Input = ui.Input
+      // Each load claims a generation. Collapsing before the config arrives
+      // invalidates that load because reopening starts a fresh one. Once the
+      // form exists, its in-flight discovery stays relevant across collapse.
+      // The counter survives renders because ConfigCard is built once.
+      var gen = 0
 
       // Built once per card so useSyncExternalStore is not handed a new
       // subscribe on every render, which would resubscribe every render.
@@ -446,9 +451,11 @@ window.__ModuleLoader__.load({
         var seed = (next, provider, keepReuse) => nextDraft(next, provider, keepReuse)
 
         var load = react.useCallback(() => {
-          // discover: the self-check probing which local harnesses exist to
-          // be borrowed. Paid once per expand, cached host-side.
-          fetch('/modlens/config?discover=1')
+          // Config first, so the engine form can render. Discovery is the
+          // self-check probing which local harnesses exist to be borrowed,
+          // paid after the form is up, cached host-side.
+          var id = ++gen
+          fetch('/modlens/config')
             .then((r) =>
               r.json().then((body) => {
                 if (!r.ok) throw new Error(body.error || '')
@@ -456,11 +463,38 @@ window.__ModuleLoader__.load({
               }),
             )
             .then((next) => {
+              if (id !== gen) return
               summaryState[1](next)
               draftState[1](seed(next, next.provider))
               noteState[1]('')
+              return fetch('/modlens/config?discover=1')
+                .then((r) =>
+                  r.json().then((body) => {
+                    if (!r.ok) throw new Error(body.error || '')
+                    return body
+                  }),
+                )
+                .then((discovered) => {
+                  if (id !== gen) return
+                  summaryState[1]((prev) => {
+                    if (!prev) return prev
+                    var merged = Object.assign({}, prev)
+                    merged.discovery = discovered && 'discovery' in discovered ? discovered.discovery : null
+                    return merged
+                  })
+                })
+                .catch(() => {
+                  if (id !== gen) return
+                  summaryState[1]((prev) => {
+                    if (!prev) return prev
+                    var merged = Object.assign({}, prev)
+                    merged.discovery = null
+                    return merged
+                  })
+                })
             })
             .catch((error) => {
+              if (id !== gen) return
               noteState[1](noteFrom(error, t.loadFailed))
             })
         }, [])
@@ -704,7 +738,7 @@ window.__ModuleLoader__.load({
                 h(
                   'div',
                   { style: { display: 'flex', flexWrap: 'wrap', gap: '10px 18px', paddingTop: '2px' } },
-                  autoRows,
+                  'discovery' in summary ? autoRows : t.loading,
                 ),
                 'auto',
                 t.autoTitle,
@@ -801,10 +835,15 @@ window.__ModuleLoader__.load({
                           }),
                         )
                         .then((next) => {
-                          // The save response carries no discovery; keep the
-                          // probes already on screen.
-                          next.discovery = summary.discovery
-                          summaryState[1](next)
+                          // The save response carries no discovery. Read the
+                          // current state here because the lazy probe may have
+                          // landed after this save began.
+                          summaryState[1]((prev) => {
+                            if (!prev || !('discovery' in prev)) return next
+                            var merged = Object.assign({}, next)
+                            merged.discovery = prev.discovery
+                            return merged
+                          })
                           draftState[1](seed(next, next.provider))
                           noteState[1](t.saved)
                         })
@@ -851,6 +890,7 @@ window.__ModuleLoader__.load({
               type: 'button',
               'aria-expanded': open,
               onClick: () => {
+                if (open && summary === null) gen += 1
                 openState[1](!open)
               },
               style: {

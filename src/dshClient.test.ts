@@ -976,3 +976,398 @@ describe('the card follows dsh’s own interface language', () => {
         expect(card.texts).not.toContain(ZH_TITLE);
     });
 });
+
+describe('settings card progressive discovery (#83)', () => {
+    // Expanding used to wait on `doctor --json` before any field appeared.
+    // The form is the config GET. The auto-mode section is a later probe.
+    const SOURCE = fs.readFileSync(path.join(__dirname, '..', 'dsh', 'client.js'), 'utf-8');
+
+    const CONFIG = {
+        provider: 'openai',
+        engines: { openai: { baseUrl: '', model: '', hasKey: true, source: 'file' } },
+        keyless: [] as string[],
+        reuse: { claude: false, codex: false, opencode: false, pi: false, grok: false },
+    };
+
+    const CLAUDE_PROBE = {
+        harness: 'claude',
+        cliFound: true,
+        loggedIn: true,
+        cliPath: '/usr/bin/claude',
+    };
+
+    interface Node {
+        type: unknown;
+        props: Record<string, unknown>;
+        kids: unknown[];
+    }
+
+    interface Progressive {
+        texts: () => string[];
+        expand: () => void;
+        collapse: () => void;
+        changeProvider: (provider: string) => void;
+        save: () => void;
+        fetchCalls: FetchCall[];
+        selectedProvider: () => string;
+        resolveConfig: (request: number, body: unknown) => void;
+        resolveDiscover: (body: unknown) => void;
+        resolveSave: (body: unknown) => void;
+    }
+
+    function depsEqual(left?: unknown[], right?: unknown[]): boolean {
+        if (left === right) return true;
+        if (!left || !right || left.length !== right.length) return false;
+        return left.every((item, index) => Object.is(item, right[index]));
+    }
+
+    function walk(node: unknown, visit: (el: Node) => void): void {
+        if (node == null || typeof node !== 'object') return;
+        if (Array.isArray(node)) {
+            for (const child of node) walk(child, visit);
+            return;
+        }
+        const el = node as Node;
+        visit(el);
+        walk(el.kids, visit);
+    }
+
+    function textsOf(root: unknown): string[] {
+        const texts: string[] = [];
+        const take = (node: unknown): void => {
+            if (node == null || node === false) return;
+            if (typeof node === 'string') {
+                texts.push(node);
+                return;
+            }
+            if (typeof node === 'number') {
+                texts.push(String(node));
+                return;
+            }
+            if (Array.isArray(node)) {
+                for (const child of node) take(child);
+                return;
+            }
+            if (typeof node === 'object' && node !== null && 'kids' in node) {
+                take((node as Node).kids);
+            }
+        };
+        take(root);
+        return texts;
+    }
+
+    function findToggle(root: unknown): Node | undefined {
+        let found: Node | undefined;
+        walk(root, (el) => {
+            if (found) return;
+            if (el.type === 'button' && el.props && 'aria-expanded' in el.props) found = el;
+        });
+        return found;
+    }
+
+    async function flush(): Promise<void> {
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+    }
+
+    function mount(options: { deferConfig?: boolean; deferSave?: boolean } = {}): Progressive {
+        let loaded:
+            | {
+                  factory: (require: (id: string) => unknown) => {
+                      __card: { ConfigCard: (react: unknown, ui: unknown) => () => unknown };
+                  };
+              }
+            | undefined;
+        const windowStub = {
+            __ModuleLoader__: {
+                load: (definition: typeof loaded) => {
+                    loaded = definition;
+                },
+            },
+        };
+        const documentStub = {
+            addEventListener: () => {},
+            removeEventListener: () => {},
+            querySelectorAll: () => [],
+            documentElement: { lang: 'en' },
+        };
+
+        const fetchCalls: FetchCall[] = [];
+        let resolveDiscover!: (body: unknown) => void;
+        const discover = new Promise<unknown>((resolve) => {
+            resolveDiscover = resolve;
+        });
+        let resolveSave!: (body: unknown) => void;
+        const save = new Promise<unknown>((resolve) => {
+            resolveSave = resolve;
+        });
+        const configResolvers: Array<(body: unknown) => void> = [];
+
+        const fetchStub = (url: string, init?: { method?: string; body?: unknown }) => {
+            fetchCalls.push({ url, init });
+            if (init?.method === 'POST') {
+                const body = options.deferSave ? save : Promise.resolve({ ...CONFIG });
+                return body.then((next) => ({
+                    ok: true,
+                    json: () => Promise.resolve(next),
+                }));
+            }
+            if (String(url).includes('discover=')) {
+                return discover.then((body) => ({
+                    ok: true,
+                    json: () => Promise.resolve(body),
+                }));
+            }
+            const body = options.deferConfig
+                ? new Promise<unknown>((resolve) => configResolvers.push(resolve))
+                : Promise.resolve({ ...CONFIG });
+            return body.then((next) => ({
+                ok: true,
+                json: () => Promise.resolve(next),
+            }));
+        };
+
+        new Function('window', 'document', 'CSS', 'fetch', 'navigator', SOURCE)(
+            windowStub,
+            documentStub,
+            undefined,
+            fetchStub,
+            { language: 'en' },
+        );
+
+        type Hook = { value: unknown; deps?: unknown[] };
+        const hooks: Hook[] = [];
+        let hookIndex = 0;
+        const pendingEffects: Array<{ index: number; fn: () => void; deps?: unknown[] }> = [];
+        let root: unknown;
+        let Card: () => unknown;
+
+        const rerender = () => {
+            hookIndex = 0;
+            pendingEffects.length = 0;
+            root = Card();
+            const scheduled = pendingEffects.slice();
+            pendingEffects.length = 0;
+            for (const effect of scheduled) {
+                const prev = hooks[effect.index];
+                const changed = !prev || !depsEqual(prev.deps, effect.deps);
+                hooks[effect.index] = { value: undefined, deps: effect.deps };
+                if (changed) effect.fn();
+            }
+        };
+
+        const react = {
+            createElement: (type: unknown, props: Record<string, unknown>, ...kids: unknown[]) => {
+                const node: Node = { type, props: props ?? {}, kids };
+                return node;
+            },
+            useState: (initial: unknown) => {
+                const index = hookIndex++;
+                if (hooks[index] === undefined) hooks[index] = { value: initial };
+                const setState = (update: unknown) => {
+                    const prev = hooks[index].value;
+                    hooks[index].value =
+                        typeof update === 'function'
+                            ? (update as (p: unknown) => unknown)(prev)
+                            : update;
+                    rerender();
+                };
+                return [hooks[index].value, setState];
+            },
+            useCallback: (fn: unknown, deps?: unknown[]) => {
+                const index = hookIndex++;
+                const prev = hooks[index];
+                if (prev && depsEqual(prev.deps, deps)) return prev.value;
+                hooks[index] = { value: fn, deps };
+                return fn;
+            },
+            useEffect: (fn: () => void, deps?: unknown[]) => {
+                const index = hookIndex++;
+                pendingEffects.push({ index, fn, deps });
+            },
+        };
+
+        const Input = function Input() {
+            return null;
+        };
+        Card = (loaded as NonNullable<typeof loaded>)
+            .factory(() => ({}))
+            .__card.ConfigCard(react, {
+                Input,
+            });
+        rerender();
+
+        const clickToggle = () => {
+            const button = findToggle(root);
+            if (!button) throw new Error('no expand/collapse button');
+            (button.props.onClick as () => void)();
+        };
+        const find = (predicate: (node: Node) => boolean, message: string): Node => {
+            let found: Node | undefined;
+            walk(root, (node) => {
+                if (!found && predicate(node)) found = node;
+            });
+            if (!found) throw new Error(message);
+            return found;
+        };
+
+        return {
+            texts: () => textsOf(root),
+            expand: clickToggle,
+            collapse: clickToggle,
+            changeProvider: (provider: string) => {
+                const select = find((node) => node.type === 'select', 'no engine select');
+                (select.props.onChange as (event: unknown) => void)({
+                    target: { value: provider },
+                });
+            },
+            save: () => {
+                const button = find(
+                    (node) => node.type === 'button' && textsOf(node.kids).includes('Save'),
+                    'no save button',
+                );
+                (button.props.onClick as () => void)();
+            },
+            fetchCalls,
+            selectedProvider: () => {
+                const select = find((node) => node.type === 'select', 'no engine select');
+                return String(select.props.value);
+            },
+            resolveConfig: (request: number, body: unknown) => {
+                const resolve = configResolvers[request];
+                if (!resolve) throw new Error(`no config request ${request}`);
+                resolve(body);
+            },
+            resolveDiscover: (body: unknown) => resolveDiscover(body),
+            resolveSave: (body: unknown) => resolveSave(body),
+        };
+    }
+
+    it('renders the engine form while local-agent discovery is still in flight', async () => {
+        const card = mount();
+        card.expand();
+        await flush();
+
+        expect(card.fetchCalls.map((call) => call.url)).toEqual([
+            '/modlens/config',
+            '/modlens/config?discover=1',
+        ]);
+
+        const texts = card.texts();
+        expect(texts).toContain('Engine');
+        expect(texts).toContain('API key');
+        expect(texts).toContain('Model');
+        expect(texts).toContain('Save');
+        expect(texts).toContain('loading...');
+        expect(texts).not.toContain('claude');
+        expect(texts).not.toContain('codex');
+    });
+
+    it('fills the auto-mode section once discovery returns, without hiding the form', async () => {
+        const card = mount();
+        card.expand();
+        await flush();
+
+        card.resolveDiscover({
+            ...CONFIG,
+            discovery: [CLAUDE_PROBE],
+        });
+        await flush();
+
+        const texts = card.texts();
+        expect(texts).toContain('Engine');
+        expect(texts).toContain('API key');
+        expect(texts).toContain('Model');
+        expect(texts).toContain('Save');
+        expect(texts).toContain('claude');
+        expect(texts).not.toContain('codex');
+        expect(texts).not.toContain('loading...');
+    });
+
+    it('falls back to the full grant list when discovery returns null', async () => {
+        const card = mount();
+        card.expand();
+        await flush();
+
+        card.resolveDiscover({
+            ...CONFIG,
+            discovery: null,
+        });
+        await flush();
+
+        expect(card.texts()).toEqual(
+            expect.arrayContaining(['claude', 'codex', 'opencode', 'pi', 'grok']),
+        );
+        expect(card.texts()).not.toContain('loading...');
+    });
+
+    it('ignores an older config load that lands after collapse and reopen', async () => {
+        const card = mount({ deferConfig: true });
+        card.expand();
+        await flush();
+        card.collapse();
+        card.resolveConfig(0, { ...CONFIG, provider: '' });
+        await flush();
+        card.expand();
+        await flush();
+
+        expect(card.fetchCalls.filter((call) => call.url === '/modlens/config')).toHaveLength(2);
+        card.resolveConfig(1, { ...CONFIG });
+        await flush();
+        expect(card.selectedProvider()).toBe('openai');
+        expect(
+            card.fetchCalls.filter((call) => call.url === '/modlens/config?discover=1'),
+        ).toHaveLength(1);
+    });
+
+    it('keeps discovery that lands while an earlier save is still in flight', async () => {
+        const card = mount({ deferSave: true });
+        card.expand();
+        await flush();
+
+        card.changeProvider('');
+        card.save();
+        await flush();
+
+        card.resolveDiscover({
+            ...CONFIG,
+            discovery: [CLAUDE_PROBE],
+        });
+        await flush();
+        expect(card.texts()).toContain('claude');
+        expect(card.texts()).not.toContain('codex');
+
+        card.resolveSave({ ...CONFIG });
+        await flush();
+
+        expect(card.texts()).toContain('saved');
+        expect(card.texts()).toContain('claude');
+        expect(card.texts()).not.toContain('codex');
+    });
+
+    it('keeps an in-flight discovery across collapse and reopen without probing twice', async () => {
+        const card = mount();
+        card.expand();
+        await flush();
+        card.changeProvider('');
+        card.collapse();
+        card.expand();
+        await flush();
+        expect(card.selectedProvider()).toBe('');
+
+        card.resolveDiscover({
+            ...CONFIG,
+            discovery: [CLAUDE_PROBE],
+        });
+        await flush();
+
+        const texts = card.texts();
+        expect(texts).toContain('claude');
+        expect(texts).not.toContain('codex');
+        expect(texts).not.toContain('loading...');
+        expect(card.selectedProvider()).toBe('');
+        expect(card.fetchCalls.map((call) => call.url)).toEqual([
+            '/modlens/config',
+            '/modlens/config?discover=1',
+        ]);
+    });
+});

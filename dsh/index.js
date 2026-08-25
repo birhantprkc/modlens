@@ -1777,10 +1777,10 @@ function applyEngineSettings(patch) {
  * The self-check behind the card's auto-mode section: which local harnesses
  * exist to be borrowed at all. `doctor --json` already probes them without
  * network or quota, so the route spawns the CLI this package ships and lifts
- * its reuse section. Cached briefly, since one probe can take a second and
- * re-expanding the card should not re-pay it.
+ * its reuse section. Cached for ten minutes, since one probe can take a
+ * second and re-expanding the card should not re-pay it.
  */
-const DISCOVERY_TTL_MS = 60_000
+const DISCOVERY_TTL_MS = 600_000
 let discoveryCache = null
 async function discoverReuse() {
   if (discoveryCache !== null && Date.now() - discoveryCache.at < DISCOVERY_TTL_MS) {
