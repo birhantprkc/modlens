@@ -128,6 +128,96 @@ describe('allowlist mode', () => {
         expect(verdict.matched).toBe('glm-*v*');
     });
 
+    it('denies GLM-5.3-Flash under the documented example rules', () => {
+        // configure.md dropped the broad glm-5.* allow after GLM-5.3-Flash
+        // shipped without a v in the name. The example lists known text
+        // models on both bare and namespaced forms, and denies flash slugs
+        // only as a complete token or a delimited suffix.
+        const exampleGuards = {
+            allowModels: [
+                'deepseek-v4-*',
+                'glm-5.2*',
+                '*/glm-5.2*',
+                'glm-5.3',
+                '*/glm-5.3',
+                'minimax-m2.5*',
+                'qwen3-coder*',
+            ],
+            denyModels: [
+                'glm-*v*',
+                '*/glm-*v*',
+                'glm-5.3-flash',
+                'glm-5.3-flash-*',
+                'glm-5.3-flash:*',
+                '*/glm-5.3-flash',
+                '*/glm-5.3-flash-*',
+                '*/glm-5.3-flash:*',
+                'deepseek-vl*',
+            ],
+        };
+        const bareFlash = evaluateGuard(exampleGuards, {
+            model: 'glm-5.3-flash',
+            source: 'storage',
+        });
+        expect(bareFlash.guard).toBe('deny');
+        expect(bareFlash.matched).toBe('glm-5.3-flash');
+        const namespacedFlash = evaluateGuard(exampleGuards, {
+            model: 'z-ai/glm-5.3-flash',
+            source: 'storage',
+        });
+        expect(namespacedFlash.guard).toBe('deny');
+        expect(namespacedFlash.matched).toBe('*/glm-5.3-flash');
+        const flashFree = evaluateGuard(exampleGuards, {
+            model: 'glm-5.3-flash:free',
+            source: 'storage',
+        });
+        expect(flashFree.guard).toBe('deny');
+        expect(flashFree.matched).toBe('glm-5.3-flash:*');
+        const flashAir = evaluateGuard(exampleGuards, {
+            model: 'glm-5.3-flash-air',
+            source: 'storage',
+        });
+        expect(flashAir.guard).toBe('deny');
+        expect(flashAir.matched).toBe('glm-5.3-flash-*');
+        const flashlight = evaluateGuard(exampleGuards, {
+            model: 'glm-5.3-flashlight',
+            source: 'storage',
+        });
+        expect(flashlight.guard).toBe('deny');
+        expect(flashlight.matched).toBeUndefined();
+        expect(flashlight.reason).toContain('allowModels');
+        const namespacedV = evaluateGuard(exampleGuards, {
+            model: 'z-ai/glm-5.2v',
+            source: 'storage',
+        });
+        expect(namespacedV.guard).toBe('deny');
+        expect(namespacedV.matched).toBe('*/glm-*v*');
+        const namespacedVFree = evaluateGuard(exampleGuards, {
+            model: 'z-ai/glm-5.2v:free',
+            source: 'storage',
+        });
+        expect(namespacedVFree.guard).toBe('deny');
+        expect(namespacedVFree.matched).toBe('*/glm-*v*');
+        const namespacedVision = evaluateGuard(exampleGuards, {
+            model: 'z-ai/glm-5.2-vision',
+            source: 'storage',
+        });
+        expect(namespacedVision.guard).toBe('deny');
+        expect(namespacedVision.matched).toBe('*/glm-*v*');
+        expect(evaluateGuard(exampleGuards, { model: 'glm-5.3', source: 'storage' }).guard).toBe(
+            'allow',
+        );
+        expect(evaluateGuard(exampleGuards, { model: 'glm-5.2', source: 'storage' }).guard).toBe(
+            'allow',
+        );
+        expect(
+            evaluateGuard(exampleGuards, { model: 'z-ai/glm-5.3', source: 'storage' }).guard,
+        ).toBe('allow');
+        expect(
+            evaluateGuard(exampleGuards, { model: 'z-ai/glm-5.2:free', source: 'storage' }).guard,
+        ).toBe('allow');
+    });
+
     it('matches allow patterns against provider/model too', () => {
         const verdict = evaluateGuard(
             { allowModels: ['ds-gateway/*'] },
