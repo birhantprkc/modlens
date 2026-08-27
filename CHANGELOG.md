@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.25.2 - 2026-08-28
 
 - **GLM-5.3-Flash is recognized as native vision.** Z.ai released `glm-5.3-flash` on 2026-08-26 as the GLM-5 line's first natively multimodal model, and its name carries neither `v` nor `vision`. The reuse vision table matches the complete slug and delimited suffixes (`:free`, `-air`), so the bare slug, OpenRouter's `z-ai/glm-5.3-flash`, HuggingFace's `zai-org/GLM-5.3-Flash`, and `glm-5.3-flash:free` are judged image-capable, while a run-on name like `glm-5.3-flashlight` is not. The dsh wrapper's name gate uses the same boundary, so a catalog that copies the id without modalities does not mint a `(modlens vision)` twin and strip native sight. GLM-5.3 itself stays text-only. The guard example in `configure.md` drops the broad `glm-5.*` allow in favour of the known text spellings on both bare and namespaced forms (`glm-5.2*`, `*/glm-5.2*`, `glm-5.3`, `*/glm-5.3`). Vision denials are also namespaced: `glm-*v*` and `*/glm-*v*` carve `z-ai/glm-5.2v` and `z-ai/glm-5.2-vision` out of `*/glm-5.2*`, and flash denials use delimited patterns rather than a trailing `*`. Docs also note that GLM-5.3 and GLM-5.3-Flash cannot disable thinking.
 
