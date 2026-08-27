@@ -816,7 +816,9 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
           return (async function* () {
             const converted = await convertImagesToEvidence(ctx, options.messages, options.signal, self)
             const messages = restoreUpstreamSource(converted, providerId, upstream)
-            yield* llm.stream({ ...options, provider: upstream, messages })
+            // Downstream meters can skip this hop when options.via names the
+            // wrapper that forwarded it, and count only the upstream stream (#89).
+            yield* llm.stream({ ...options, provider: upstream, messages, via: providerId })
           })()
         },
         evidenceCache,

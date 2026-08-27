@@ -753,6 +753,7 @@ describe('dsh plugin vision provider (phase 3)', () => {
             signal,
             maxTokens: 4096,
             reasoningEffort: 'high',
+            via: 'deepseek-modlens',
         });
     });
 
@@ -806,6 +807,7 @@ describe('dsh plugin vision provider (phase 3)', () => {
             // drain
         }
         expect(streamed[0].provider).toBe('deepseek-official');
+        expect(streamed[0].via).toBe('deepseek-modlens');
     });
 
     it('degrades silently without the registration surface or when disabled', async () => {
