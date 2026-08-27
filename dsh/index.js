@@ -658,14 +658,17 @@ function restoreUpstreamSource(messages, wrapperId, upstream) {
 function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
   // Wrap only the text-only members of these families. Their own vision
   // models (present or future: deepseek-vl/ocr/janus, glm-4.5v, glm-5v-...,
-  // deepseek-v4-flash-vision-exp) need no bridge and are excluded by name and
-  // by declared modality. The name gate matters on its own: third-party
-  // catalogs copy an id without its modalities, and a vision model handed a
-  // wrapper twin loses its native sight. Family matching also strips a vendor
-  // namespace (OpenRouter's z-ai/glm-5.2:free, ~-prefixed aliases), because
-  // the text-only member is the same model wherever the id carries a prefix.
+  // glm-5.3-flash, deepseek-v4-flash-vision-exp) need no bridge and are
+  // excluded by name and by declared modality. The name gate matters on its
+  // own: third-party catalogs copy an id without its modalities, and a vision
+  // model handed a wrapper twin loses its native sight. Family matching also
+  // strips a vendor namespace (OpenRouter's z-ai/glm-5.2:free, ~-prefixed
+  // aliases), because the text-only member is the same model wherever the id
+  // carries a prefix. GLM-5.3-Flash (2026-08-26) is native multimodal without
+  // a v in the name, so the glm-*v* branch cannot catch it. GLM-5.3 itself
+  // stays wrappable.
   const families = config.families || ['deepseek', 'glm', 'mimo']
-  const VISION_ID = /(deepseek-(vl|ocr)|janus|glm-[\d.]*v(\b|-)|\bvision\b)/i
+  const VISION_ID = /(deepseek-(vl|ocr)|janus|glm-[\d.]*v(\b|-)|glm-5\.3-flash(?:$|[-:])|\bvision\b)/i
   const shouldWrap = (info) => {
     const id = String(info?.id ?? '').toLowerCase()
     // The model's own name: alias marker and vendor namespace stripped. The

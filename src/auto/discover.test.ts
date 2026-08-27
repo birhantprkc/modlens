@@ -41,8 +41,22 @@ describe('builtin vision table', () => {
     it('does not claim text-only coding models', () => {
         expect(isVisionModel('deepseek-v4-flash')).toBe(false);
         expect(isVisionModel('glm-5.2')).toBe(false);
+        expect(isVisionModel('glm-5.3')).toBe(false);
         expect(isVisionModel('minimax-m2.7')).toBe(false);
         expect(isVisionModel('qwen3-coder-plus')).toBe(false);
+    });
+
+    it('recognizes GLM-5.3-Flash as native vision under every published slug', () => {
+        // Z.ai shipped glm-5.3-flash on 2026-08-26 as the GLM-5 line's first
+        // native multimodal model. The name carries no v, so glm-*v* does not
+        // catch it. GLM-5.3 itself stays text-only above.
+        expect(isVisionModel('glm-5.3-flash')).toBe(true);
+        expect(isVisionModel('z-ai/glm-5.3-flash')).toBe(true);
+        expect(isVisionModel('zai-org/GLM-5.3-Flash')).toBe(true);
+        expect(isVisionModel('glm-5.3-flash:free')).toBe(true);
+        expect(isVisionModel('glm-5.3-flash-air')).toBe(true);
+        // A run-on continuation is a different slug, not a delimited suffix.
+        expect(isVisionModel('glm-5.3-flashlight')).toBe(false);
     });
 
     it('matches provider-prefixed ids by their bare model id', () => {

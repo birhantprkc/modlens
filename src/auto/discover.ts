@@ -19,6 +19,7 @@ import { resolveSpawnPlan } from '../util/winExec.ts';
  * hardcoded: the field moves fast but a release cadence keeps up, and harness
  * metadata (codex input_modalities, pi input) outranks this table wherever it
  * exists. Snapshot: 2026-08 (mimo/qwen tiers re-checked against models.dev on 2026-08-20).
+ * glm-5.3-flash added 2026-08-26.
  */
 const VISION_MODEL_PATTERNS = [
     'claude-*',
@@ -29,6 +30,13 @@ const VISION_MODEL_PATTERNS = [
     'o4*',
     'gemini-*',
     'glm-*v*',
+    // GLM-5.3-Flash (2026-08-26): first native multimodal in the GLM-5 line.
+    // The name carries no v, so glm-*v* does not catch it. Match the complete
+    // slug or a delimited suffix (:free, -air). A run-on name like
+    // glm-5.3-flashlight is not the same model. GLM-5.3 itself stays text-only.
+    'glm-5.3-flash',
+    'glm-5.3-flash-*',
+    'glm-5.3-flash:*',
     'qwen*-vl*',
     'qwen3.5-plus*',
     'qwen3.6-plus*',

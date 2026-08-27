@@ -2933,6 +2933,52 @@ describe('dsh vision provider auto-discovery (#29)', () => {
         expect(registered).toEqual([]);
     });
 
+    it('never wraps GLM-5.3-Flash, even when the catalog omits modalities', async () => {
+        // GLM-5.3-Flash shipped 2026-08-26 as the GLM-5 line's first native
+        // multimodal model. Its name carries neither v nor vision, so the
+        // older glm-*v* / vision gates would have minted a wrapper twin and
+        // stripped native sight. GLM-5.3 itself stays wrappable.
+        const { registered } = await discoveryCtx([
+            {
+                id: 'zai',
+                models: [{ id: 'glm-5.3-flash' }],
+            },
+        ]);
+        expect(registered).toEqual([]);
+    });
+
+    it('never wraps a namespaced GLM-5.3-Flash qualifier without modalities', async () => {
+        const { registered } = await discoveryCtx([
+            {
+                id: 'zai',
+                models: [{ id: 'z-ai/glm-5.3-flash:free' }],
+            },
+        ]);
+        expect(registered).toEqual([]);
+    });
+
+    it('never wraps a GLM-5.3-Flash delimited suffix without modalities', async () => {
+        const { registered } = await discoveryCtx([
+            {
+                id: 'zai',
+                models: [{ id: 'glm-5.3-flash-air' }],
+            },
+        ]);
+        expect(registered).toEqual([]);
+    });
+
+    it('still wraps a run-on GLM name that is not GLM-5.3-Flash', async () => {
+        // The flash gate must require a slug boundary. A trailing substring
+        // match would treat glm-5.3-flashlight as vision and skip the wrapper.
+        const { registered } = await discoveryCtx([
+            {
+                id: 'zai',
+                models: [{ id: 'glm-5.3-flashlight' }],
+            },
+        ]);
+        expect(registered).toEqual(['modlens-zai']);
+    });
+
     it('sees family models behind a vendor namespace prefix', async () => {
         // OpenRouter spells GLM as z-ai/glm-5.2:free and aliases carry a
         // leading ~. Text-only family members are exactly what the wrapper
