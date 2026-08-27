@@ -28,6 +28,7 @@ import {
 } from './providers/index.ts';
 import { missingSchemaFields, normalizeVisionResult } from './schema.ts';
 import { isApiKeyFailure, splitApiKeys } from './util/apiKeys.ts';
+import { setErrorMessage } from './util/error.ts';
 import { redactSecrets } from './util/redact.ts';
 import { spawnHidden } from './util/spawnHidden.ts';
 import { resolveSpawnPlan } from './util/winExec.ts';
@@ -245,7 +246,7 @@ export async function analyzeImage(options: AnalyzeOptions): Promise<AnalyzeResu
                     apiKeys,
                 );
                 if (error instanceof Error) {
-                    error.message = message;
+                    setErrorMessage(error, message);
                 }
                 lastError = error;
                 attempts.push({
@@ -823,7 +824,7 @@ export function runCommand(
                 // Keep an Error from describeFailure so instanceof (quota
                 // classification) survives; only wrap a string into a new Error.
                 if (explained instanceof Error) {
-                    explained.message = redactSecrets(explained.message);
+                    setErrorMessage(explained, redactSecrets(explained.message));
                     reject(explained);
                     return;
                 }

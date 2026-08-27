@@ -495,6 +495,30 @@ describe.skipIf(onWindows)('provider subprocess handling', () => {
         await waitFor(() => (isAlive(pid) ? null : true));
         expect(isAlive(pid)).toBe(false);
     }, 15_000);
+
+    it('redacts a getter-only describeFailure message without replacing the Error (issue #85)', async () => {
+        const { bin } = fakeProvider('#!/bin/sh\necho "boom" >&2\nexit 1\n');
+        const described = new Error('placeholder');
+        Object.defineProperty(described, 'message', {
+            get: () => 'leaked sk-proj-abcdefghijklmnopqrstuvwxyz1234',
+            configurable: true,
+        });
+
+        let rejected: unknown;
+        try {
+            await runCommand(
+                'fake',
+                { command: bin, args: [], cwd: os.tmpdir() },
+                5_000,
+                () => described,
+            );
+        } catch (error) {
+            rejected = error;
+        }
+        expect(rejected).toBe(described);
+        expect(described.message).toContain('[redacted]');
+        expect(described.message).not.toContain('sk-proj-');
+    }, 15_000);
 });
 
 function isAlive(pid: number): boolean {
@@ -1478,5 +1502,48 @@ describe('per-provider API key rotation', () => {
         expect(result.meta.attempts[0].ok).toBe(true);
         expect(result.meta.attempts[0].keyIndex).toBeUndefined();
         expect(JSON.stringify(result.meta.attempts[0])).not.toContain('keyIndex');
+    });
+
+    it('fails over from a getter-only AbortError instead of crashing on error.message (issue #85)', async () => {
+        tmpImage();
+        const openaiOk = () =>
+            new Response(
+                JSON.stringify({
+                    choices: [{ message: { content: JSON.stringify(CONTRACT_RESULT) } }],
+                }),
+                { status: 200 },
+            );
+
+        // Throw a real AbortError. A parse or schema failure would pass today
+        // without hitting the getter-only assignment (issue #85).
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async (url: string) => {
+                const href = String(url);
+                if (href.includes('gw.example.com') || href.includes('/chat/completions')) {
+                    return openaiOk();
+                }
+                throw new DOMException('The operation was aborted.', 'AbortError');
+            }),
+        );
+
+        const result = await analyzeImage({
+            input: image,
+            config: {
+                providers: {
+                    'gemini-api': { apiKey: 'gemini-key-aaaa' },
+                    openai: {
+                        apiKey: 'openai-key-aaaa',
+                        baseUrl: 'https://gw.example.com/v1',
+                        model: 'vision-model',
+                    },
+                },
+            },
+            timeoutMs: 20_000,
+        });
+
+        expect(result.provider).toBe('openai');
+        expect(result.meta.attempts[0]).toMatchObject({ provider: 'gemini-api', ok: false });
+        expect(result.meta.attempts[0].error).not.toContain('Cannot set property message');
     });
 });
