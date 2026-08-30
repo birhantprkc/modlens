@@ -15,6 +15,16 @@ import {
 } from './cooldown.ts';
 import { ApiKeyFailureError } from './util/apiKeys.ts';
 
+// Production apiFetch always uses npm undici fetch. Tests bridge it back to
+// the global fetch so the existing vi.stubGlobal('fetch') doubles keep working.
+vi.mock('undici', async (importOriginal) => {
+    const real = await importOriginal<typeof import('undici')>();
+    return {
+        ...real,
+        fetch: (...args: Parameters<typeof globalThis.fetch>) => globalThis.fetch(...args),
+    };
+});
+
 const onWindows = process.platform === 'win32';
 
 describe('resolveInput', () => {

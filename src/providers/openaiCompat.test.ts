@@ -5,6 +5,16 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { ApiKeyFailureError } from '../util/apiKeys.ts';
 import { executeOpenaiCompat } from './openaiCompat.ts';
 
+// Production apiFetch always uses npm undici fetch. Tests bridge it back to
+// the global fetch so the existing vi.stubGlobal('fetch') doubles keep working.
+vi.mock('undici', async (importOriginal) => {
+    const real = await importOriginal<typeof import('undici')>();
+    return {
+        ...real,
+        fetch: (...args: Parameters<typeof globalThis.fetch>) => globalThis.fetch(...args),
+    };
+});
+
 // A full instance of the contract: the shape check now requires every field,
 // because a gateway returning half of it is not a usable vision result.
 const structured = {
@@ -288,14 +298,21 @@ describe('schema shape enforcement', () => {
         // as if it were evidence.
         vi.stubGlobal(
             'fetch',
-            vi.fn(async () => ({
-                ok: true,
-                json: async () => ({
-                    choices: [
-                        { message: { content: JSON.stringify({ summary: 'x', ocr: null }) } },
-                    ],
-                }),
-            })),
+            vi.fn(
+                async () =>
+                    new Response(
+                        JSON.stringify({
+                            choices: [
+                                {
+                                    message: {
+                                        content: JSON.stringify({ summary: 'x', ocr: null }),
+                                    },
+                                },
+                            ],
+                        }),
+                        { status: 200 },
+                    ),
+            ),
         );
         await expect(
             executeOpenaiCompat({
@@ -596,17 +613,20 @@ describe('a mismatched shape names the knob that applies (#59)', () => {
     function stubHalfAnswer(finishReason?: string) {
         vi.stubGlobal(
             'fetch',
-            vi.fn(async () => ({
-                ok: true,
-                json: async () => ({
-                    choices: [
-                        {
-                            message: { content: JSON.stringify({ summary: 'x' }) },
-                            ...(finishReason ? { finish_reason: finishReason } : {}),
-                        },
-                    ],
-                }),
-            })),
+            vi.fn(
+                async () =>
+                    new Response(
+                        JSON.stringify({
+                            choices: [
+                                {
+                                    message: { content: JSON.stringify({ summary: 'x' }) },
+                                    ...(finishReason ? { finish_reason: finishReason } : {}),
+                                },
+                            ],
+                        }),
+                        { status: 200 },
+                    ),
+            ),
         );
     }
 
@@ -665,12 +685,15 @@ describe('a mismatched shape names the knob that applies (#59)', () => {
         // and leaving the other giving impossible advice is the same defect.
         vi.stubGlobal(
             'fetch',
-            vi.fn(async () => ({
-                ok: true,
-                json: async () => ({
-                    choices: [{ message: { content: 'not json' }, finish_reason: 'stop' }],
-                }),
-            })),
+            vi.fn(
+                async () =>
+                    new Response(
+                        JSON.stringify({
+                            choices: [{ message: { content: 'not json' }, finish_reason: 'stop' }],
+                        }),
+                        { status: 200 },
+                    ),
+            ),
         );
 
         const message = await messageFrom({ structuredOutput: true });
@@ -703,17 +726,20 @@ describe('a mismatched shape names the knob that applies (#59)', () => {
         // advice exists for surfaced as a TypeError instead.
         vi.stubGlobal(
             'fetch',
-            vi.fn(async () => ({
-                ok: true,
-                json: async () => ({
-                    choices: [
-                        {
-                            message: { content: JSON.stringify({ summary: 'x' }) },
-                            finish_reason: null,
-                        },
-                    ],
-                }),
-            })),
+            vi.fn(
+                async () =>
+                    new Response(
+                        JSON.stringify({
+                            choices: [
+                                {
+                                    message: { content: JSON.stringify({ summary: 'x' }) },
+                                    finish_reason: null,
+                                },
+                            ],
+                        }),
+                        { status: 200 },
+                    ),
+            ),
         );
 
         const message = await messageFrom({});
@@ -725,12 +751,15 @@ describe('a mismatched shape names the knob that applies (#59)', () => {
     it('treats a non-string finish_reason as absent on the non-JSON branch too', async () => {
         vi.stubGlobal(
             'fetch',
-            vi.fn(async () => ({
-                ok: true,
-                json: async () => ({
-                    choices: [{ message: { content: 'not json' }, finish_reason: null }],
-                }),
-            })),
+            vi.fn(
+                async () =>
+                    new Response(
+                        JSON.stringify({
+                            choices: [{ message: { content: 'not json' }, finish_reason: null }],
+                        }),
+                        { status: 200 },
+                    ),
+            ),
         );
 
         const message = await messageFrom({});

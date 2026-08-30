@@ -7,7 +7,7 @@
 // exact address being connected to, and routing it through a proxy would
 // bypass that boundary.
 import type { Dispatcher } from 'undici';
-import { EnvHttpProxyAgent, ProxyAgent, fetch as undiciFetch } from 'undici';
+import { Agent, EnvHttpProxyAgent, ProxyAgent, fetch as undiciFetch } from 'undici';
 
 /**
  * The dispatcher an API provider request should use. An explicit setting
@@ -76,20 +76,22 @@ export async function apiFetch(
     proxy: string | undefined,
     env: NodeJS.ProcessEnv = process.env,
 ): Promise<Response> {
-    const dispatcher = apiProxyDispatcher(proxy, env);
+    const dispatcher = apiProxyDispatcher(proxy, env) ?? new Agent();
     try {
-        // Dispatcher and fetch must come from the SAME undici: handing our
-        // undici's ProxyAgent to the host's built-in fetch (a different
-        // undici major) fails with UND_ERR_INVALID_ARG (issue #23). Without
-        // a proxy, the host fetch stays in charge.
-        if (dispatcher) {
-            const response = (await undiciFetch(url, {
-                ...(init as Parameters<typeof undiciFetch>[1]),
-                dispatcher,
-            })) as unknown as Response;
-            // Buffer the body before closing: close() waits for in-flight
-            // requests, and a kept-alive pool would otherwise pin the event
-            // loop so the CLI never exits (exitCode relies on loop drain).
+        // Dispatcher and fetch must come from the SAME undici: handing npm
+        // undici's Agent to the host fetch (a different undici major) fails
+        // with UND_ERR_INVALID_ARG (issue #23). Importing npm undici occupies
+        // the shared undici.globalDispatcher.2 slot, and Node 26.0.0 host
+        // fetch plus npm 8.10.0 Agent on HTTP/2 drops headers (issue #91),
+        // so the no-proxy path uses undiciFetch too.
+        const response = (await undiciFetch(url, {
+            ...(init as Parameters<typeof undiciFetch>[1]),
+            dispatcher,
+        })) as unknown as Response;
+        // Buffer the body before closing: close() waits for in-flight
+        // requests, and a kept-alive pool would otherwise pin the event
+        // loop so the CLI never exits (exitCode relies on loop drain).
+        try {
             const buffered = Buffer.from(await response.arrayBuffer());
             await dispatcher.close();
             return new Response(buffered, {
@@ -97,13 +99,35 @@ export async function apiFetch(
                 statusText: response.statusText,
                 headers: response.headers,
             });
-        }
-        return await fetch(url, init);
-    } catch (error) {
-        if (dispatcher) {
+        } catch (bodyError) {
+            // Status already arrived. A truncated body is not a connect
+            // failure: providers classify 401/429 from status, and
+            // connectFailureHint would mislabel ECONNRESET as "never
+            // reached the network". Close the pool, then hand the original
+            // error to text()/json().
             await dispatcher.close().catch(() => {});
+            return bodyFailedResponse(response, bodyError);
         }
+    } catch (error) {
+        await dispatcher.close().catch(() => {});
         const hint = connectFailureHint(error, url);
         throw hint ? new Error(hint, { cause: error }) : error;
     }
+}
+
+/** A Response whose status and headers survived, but whose body methods reject. */
+function bodyFailedResponse(response: Response, error: unknown): Response {
+    const cause = error instanceof Error ? error : new Error(String(error));
+    return new Response(
+        new ReadableStream({
+            start(controller) {
+                controller.error(cause);
+            },
+        }),
+        {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+        },
+    );
 }

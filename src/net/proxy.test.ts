@@ -1,6 +1,20 @@
 import { EnvHttpProxyAgent, ProxyAgent } from 'undici';
-import { describe, expect, it } from 'vitest';
-import { apiProxyDispatcher, connectFailureHint } from './proxy.ts';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { apiFetch, apiProxyDispatcher, connectFailureHint } from './proxy.ts';
+
+// Production apiFetch always uses npm undici fetch. Tests bridge it back to
+// the global fetch so a stub can stand in for a truncated body.
+vi.mock('undici', async (importOriginal) => {
+    const real = await importOriginal<typeof import('undici')>();
+    return {
+        ...real,
+        fetch: (...args: Parameters<typeof globalThis.fetch>) => globalThis.fetch(...args),
+    };
+});
+
+afterEach(() => {
+    vi.unstubAllGlobals();
+});
 
 describe('apiProxyDispatcher', () => {
     it('returns undefined when nothing configures a proxy', () => {
@@ -45,5 +59,31 @@ describe('connectFailureHint', () => {
     it('stays silent for non-network errors', () => {
         expect(connectFailureHint(new Error('bad json'), 'https://x.example')).toBeNull();
         expect(connectFailureHint(new TypeError('fetch failed'), 'not a url')).toBeNull();
+    });
+});
+
+describe('apiFetch body read after headers', () => {
+    it('keeps status readable and rejects body methods on a truncated 401', async () => {
+        const reset = Object.assign(new Error('aborted'), { cause: { code: 'ECONNRESET' } });
+        vi.stubGlobal('fetch', async () => ({
+            ok: false,
+            status: 401,
+            statusText: 'Unauthorized',
+            headers: new Headers({ 'content-type': 'text/plain' }),
+            arrayBuffer: async () => {
+                throw reset;
+            },
+        }));
+
+        const response = await apiFetch(
+            'https://generativelanguage.googleapis.com/v1beta/x',
+            { method: 'GET' },
+            undefined,
+        );
+        expect(response.status).toBe(401);
+        expect(response.ok).toBe(false);
+        expect(response.headers.get('content-type')).toBe('text/plain');
+        await expect(response.clone().text()).rejects.toBe(reset);
+        await expect(response.clone().json()).rejects.toBe(reset);
     });
 });

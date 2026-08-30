@@ -5,6 +5,16 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { ApiKeyFailureError } from '../util/apiKeys.ts';
 import { executeGeminiApi } from './geminiApi.ts';
 
+// Production apiFetch always uses npm undici fetch. Tests bridge it back to
+// the global fetch so the existing vi.stubGlobal('fetch') doubles keep working.
+vi.mock('undici', async (importOriginal) => {
+    const real = await importOriginal<typeof import('undici')>();
+    return {
+        ...real,
+        fetch: (...args: Parameters<typeof globalThis.fetch>) => globalThis.fetch(...args),
+    };
+});
+
 const structured = { summary: 'ok', uncertainty: [] };
 let tmpImage: string;
 
@@ -97,24 +107,6 @@ describe('executeGeminiApi', () => {
                 settings: { apiKey: 'AIzaTest' },
             }),
         ).rejects.toThrow('Gemini API error 429');
-    });
-
-    it('keeps the host fetch in charge when no proxy is configured (#23)', async () => {
-        // The proxy path uses undici's own fetch (same-sourced dispatcher),
-        // so the global stub below being hit proves the direct path; the
-        // proxied path is covered end-to-end in main.test.ts.
-        let hits = 0;
-        vi.stubGlobal('fetch', async () => {
-            hits += 1;
-            return new Response('{}', { status: 500 });
-        });
-        await executeGeminiApi({
-            imageSource: tmpImage,
-            imageKind: 'local',
-            timeoutMs: 5000,
-            settings: { apiKey: 'AIzaTest' },
-        }).catch(() => {});
-        expect(hits).toBe(1);
     });
 
     it('turns a connect failure into the proxy hint instead of bare fetch failed (#20)', async () => {
