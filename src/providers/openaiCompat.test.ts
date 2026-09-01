@@ -118,6 +118,7 @@ describe('executeOpenaiCompat', () => {
         const body = JSON.parse(String(calls[0].init.body));
         expect(body.thinking).toEqual({ type: 'disabled' });
         expect(body.messages[0].content).toHaveLength(2);
+        expect(body.stream).toBe(false);
 
         await expect(
             executeOpenaiCompat({

@@ -131,6 +131,11 @@ ${JSON_TEMPLATE_INSTRUCTION}`;
                 mergeExtraBody(
                     {
                         model,
+                        // Gateways disagree on the default: some treat a
+                        // missing stream as SSE, and response.json() then
+                        // fails on the data: prefix. Named here so the
+                        // request is JSON regardless of the gateway.
+                        stream: false,
                         // Asked for, never assumed: a gateway without
                         // structured-output support answers 400 for a field
                         // it does not know (issue #37). A response_format the
