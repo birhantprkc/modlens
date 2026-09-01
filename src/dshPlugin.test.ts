@@ -810,6 +810,36 @@ describe('dsh plugin vision provider (phase 3)', () => {
         expect(streamed[0].via).toBe('deepseek-modlens');
     });
 
+    it("serves dsh 0.1.2's imageRequestPricing dispatch (#93)", async () => {
+        // dsh >= 0.1.2 calls adapter.imageRequestPricing during compact with
+        // no feature check, so a missing method TypeErrors the turn. Real
+        // adapters inherit a base-class default that returns undefined. This
+        // plain object must supply the same no-op itself, like prepareCall.
+        const registered: Array<{
+            providers: string[];
+            adapter: Record<string, CallableFunction>;
+        }> = [];
+        const llm = {
+            registerAdapter: (providers: string[], adapter: Record<string, CallableFunction>) => {
+                registered.push({ providers, adapter });
+            },
+            listModels: async () => [{ id: 'deepseek-v4-flash' }],
+            resolveModelInfo: async (_p: string, model: string) => ({
+                provider: 'deepseek-official',
+                id: model,
+                name: 'DeepSeek V4 Flash',
+                inputModalities: ['text'],
+            }),
+            providerRetryPolicy: () => undefined,
+            stream: () => (async function* () {})(),
+        };
+        await loadWith(llm);
+        const adapter = registered[0].adapter;
+        expect(
+            adapter.imageRequestPricing('deepseek-modlens', 'deepseek-v4-flash'),
+        ).toBeUndefined();
+    });
+
     it('degrades silently without the registration surface or when disabled', async () => {
         await loadWith(undefined);
         const registered: unknown[] = [];

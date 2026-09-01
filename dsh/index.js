@@ -810,6 +810,14 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
             stream: (options) => this.stream(options),
           }
         },
+        imageRequestPricing() {
+          // dsh >= 0.1.2 calls this with no feature check, same as
+          // prepareCall. Real adapters inherit the base-class default
+          // that returns undefined. A plain object supplies it itself.
+          // The synthetic route has no provider-side image pricing of
+          // its own, so the token meter keeps its neutral estimate.
+          return undefined
+        },
         stream(options) {
           // Convert at request time, not at log time: the durable session
           // log keeps the real image blocks (so the UI shows the paste
